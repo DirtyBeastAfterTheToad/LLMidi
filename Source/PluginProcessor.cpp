@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "LlamaRunner.h"
 
 LLMidiAudioProcessor::LLMidiAudioProcessor()
 #ifndef JucePlugin_PreferredChannelConfigurations
@@ -35,7 +36,30 @@ LLMidiAudioProcessor::LLMidiAudioProcessor()
         llmidi::Step::makeSustain()
     };
 }
+void LLMidiAudioProcessor::requestLoadModelFromFile(const juce::File& file)
+{
+    LlamaContextParams p;
+    p.n_ctx = 2048;  // safe default
+    p.n_batch = 512;   // safe default for CPU
+    p.seed = 12345;
 
+    generator.requestLoadModel(file.getFullPathName().toStdString(), p);
+}
+
+void LLMidiAudioProcessor::requestLlmSmokeTest()
+{
+    generator.requestLlmSmokeTest();
+}
+
+bool LLMidiAudioProcessor::isModelReady() const
+{
+    return generator.isModelReady();
+}
+
+juce::String LLMidiAudioProcessor::getLlmStatus() const
+{
+    return generator.getLastLlmError();
+}
 
 LLMidiAudioProcessor::~LLMidiAudioProcessor() {}
 

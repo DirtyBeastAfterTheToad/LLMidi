@@ -38,7 +38,12 @@ public:
     void setStateInformation(const void* data, int sizeInBytes) override;
 
     const llmidi::Sequence& getSequence() const { return sequence; }
+    void requestLoadModelFromFile(const juce::File& file);
+    void requestLlmSmokeTest();
 
+    // For editor status polling
+    bool isModelReady() const;
+    juce::String getLlmStatus() const;
 private:
     // Host timing cache
     double sr = 44100.0;

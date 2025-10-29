@@ -1,0 +1,17 @@
+static const char* kSequenceJsonGrammar =
+R"( root ::= ws json_array ws
+json_array ::= "[" ws bars ws "]"
+bars ::= bar (ws "," ws bar){3,7}
+bar ::= "[" ws steps ws "]"
+steps ::= step (ws "," ws step){3,7}
+step ::= rest | sustain | note | chord
+rest ::= "\".\""
+sustain ::= "\"-\""
+note ::= note_string
+chord ::= "[" ws note_string (ws "," ws note_string){1,7} ws "]"
+note_string ::= "\"" pitch octave "\""
+pitch ::= [A-G] accidental?
+accidental ::= "#" | "b"
+octave ::= "-"? digit digit?   // -9..99; you will range-check to MIDI 0..127
+digit ::= [0-9]
+ws ::= ([ \t\r\n])* )";
