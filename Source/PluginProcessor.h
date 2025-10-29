@@ -70,5 +70,7 @@ private:
         const std::shared_ptr<const EventTimeline>& timeline,
         juce::MidiBuffer& midi,
         double beatsPerSecond);
+    void flushAllActiveNotes(juce::MidiBuffer& midi, int sampleOffset);
+    bool wasPlaying = false;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LLMidiAudioProcessor)
 };

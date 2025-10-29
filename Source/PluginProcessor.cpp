@@ -77,7 +77,7 @@ void LLMidiAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     sr = sampleRate;
     spb = samplesPerBlock;
     haveSchedule = false;
-    // Start the background thread lazily (it autostarts on first request)
+    wasPlaying = false;
 }
 
 void LLMidiAudioProcessor::releaseResources() {}
@@ -133,7 +133,12 @@ void LLMidiAudioProcessor::scheduleNowAtCurrentBar(const juce::AudioPlayHead::Cu
     generator.requestBuild(sequence, startBarPPQ, beatsPerBar);
     haveSchedule = true;
 }
-
+void LLMidiAudioProcessor::flushAllActiveNotes(juce::MidiBuffer& midi, int sampleOffset)
+{
+    for (const auto& k : activeNotes)
+        addNoteOff(midi, k.ch, k.pitch, sampleOffset);
+    activeNotes.clear();
+}
 void LLMidiAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals noDenormals;
@@ -141,8 +146,29 @@ void LLMidiAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
 
     juce::AudioPlayHead::CurrentPositionInfo pos;
     const bool havePos = getHostPosition(pos);
-    if (!havePos || !pos.isPlaying)
+    if (!havePos)
+    {
+        if (wasPlaying)
+        {
+            juce::MidiBuffer dummy;
+            flushAllActiveNotes(midi, 0);
+            wasPlaying = false;
+        }
         return;
+    }
+
+    if (!pos.isPlaying)
+    {
+        if (wasPlaying)
+        {
+            flushAllActiveNotes(midi, 0);
+            wasPlaying = false;
+        }
+        return;
+    }
+
+    // from here we are playing
+    wasPlaying = true;
 
     if (!haveSchedule)
         scheduleNowAtCurrentBar(pos); // requests build on the background thread
@@ -155,7 +181,7 @@ void LLMidiAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
     // If the timeline changed, reset catch-up state
     if (timeline.get() != lastTimeline.get())
     {
-        activeNotes.clear();
+        flushAllActiveNotes(midi, 0);
         didCatchUp = false;
         lastTimeline = timeline;
     }

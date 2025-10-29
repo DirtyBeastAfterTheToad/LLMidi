@@ -26,7 +26,7 @@ void MidiScheduler::buildFromSequence(const llmidi::Sequence& seq,
     const int bars = (int)seq.data.size();
     if (bars <= 0) return;
 
-    const double beatsPerStep = seq.stepLengthBeats(); // 4.0 / stepsPerBar
+    const double beatsPerStep = beatsPerBar / (double)seq.stepsPerBar;
 
     for (int b = 0; b < bars; ++b)
     {

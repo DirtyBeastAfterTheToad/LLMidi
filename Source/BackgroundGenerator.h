@@ -43,25 +43,14 @@ public:
     {
         while (!threadShouldExit())
         {
-            // Wait for work
-            workEvent.wait(500);
+            workEvent.wait(-1); // block until signaled; or keep 500 if you prefer
             if (threadShouldExit()) break;
 
             bool doWork = false;
             llmidi::Sequence localSeq;
             double localStartPPQ = 0.0;
-
-            {
-                const juce::ScopedLock sl(requestLock);
-                if (hasPending.load())
-                {
-                    localSeq = pendingSeq;
-                    localStartPPQ = pendingStartBarPPQ;
-                    hasPending.store(false);
-                    doWork = true;
-                }
-            }
             double localBeatsPerBar = 4.0;
+
             {
                 const juce::ScopedLock sl(requestLock);
                 if (hasPending.load())
@@ -73,6 +62,7 @@ public:
                     doWork = true;
                 }
             }
+
             if (!doWork)
                 continue;
 
@@ -81,17 +71,16 @@ public:
             MidiScheduler sched;
             sched.buildFromSequence(localSeq, localStartPPQ, localBeatsPerBar);
 
-            // Copy events into the timeline
             std::vector<const ScheduledMidi*> ptrs;
             sched.getEventsInRange(localStartPPQ, 1.0e12, ptrs);
             mutableTimeline->events.reserve(ptrs.size());
             for (auto* e : ptrs) mutableTimeline->events.push_back(*e);
 
             mutableTimeline->startPPQ = localStartPPQ;
-            mutableTimeline->endPPQ = mutableTimeline->events.empty() ? localStartPPQ
+            mutableTimeline->endPPQ = mutableTimeline->events.empty()
+                ? localStartPPQ
                 : mutableTimeline->events.back().ppq;
 
-            // Publish atomically as const
             std::shared_ptr<const EventTimeline> timeline = mutableTimeline;
             std::atomic_store_explicit(&currentTimeline, timeline, std::memory_order_release);
         }
