@@ -45,7 +45,10 @@ void LLMidiAudioProcessor::requestLoadModelFromFile(const juce::File& file)
 
     generator.requestLoadModel(file.getFullPathName().toStdString(), p);
 }
-
+juce::String LLMidiAudioProcessor::getLlmLog() const
+{
+    return generator.getLogText();
+}
 void LLMidiAudioProcessor::requestLlmSmokeTest()
 {
     generator.requestLlmSmokeTest();

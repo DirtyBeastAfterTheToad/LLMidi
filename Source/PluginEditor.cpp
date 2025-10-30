@@ -4,54 +4,101 @@
 LLMidiAudioProcessorEditor::LLMidiAudioProcessorEditor(LLMidiAudioProcessor& p)
     : AudioProcessorEditor(&p), audioProcessor(p)
 {
-    setSize(460, 160);
+    // Window size a bit larger to make room for log + buttons
+    setSize(500, 500);
 
+    // --- load model button ---
     addAndMakeVisible(loadButton);
-    addAndMakeVisible(smokeButton);
-    addAndMakeVisible(statusLabel);
-
-    statusLabel.setJustificationType(juce::Justification::centredLeft);
-    statusLabel.setFont(juce::FontOptions(14.0f));
-    statusLabel.setText("No model loaded.", juce::dontSendNotification);
-
     loadButton.onClick = [this]()
         {
-            modelChooser = std::make_unique<juce::FileChooser>("Select a GGUF model",
+            modelChooser = std::make_unique<juce::FileChooser>(
+                "Select a GGUF model",
                 juce::File(),
                 "*.gguf");
+
             modelChooser->launchAsync(juce::FileBrowserComponent::openMode
                 | juce::FileBrowserComponent::canSelectFiles,
                 [this](const juce::FileChooser& chooser)
                 {
                     auto file = chooser.getResult();
-                    // release the chooser now that the dialog has closed
-                    modelChooser.reset();
+                    modelChooser.reset(); // release dialog
 
                     if (file.existsAsFile())
                     {
                         audioProcessor.requestLoadModelFromFile(file);
-                        statusLabel.setText("Loading model...", juce::dontSendNotification);
+
+                        // small immediate feedback
+                        logEditor.moveCaretToEnd();
+                        logEditor.insertTextAtCaret("[UI] Loading model: " + file.getFullPathName() + "\n");
                     }
                 });
         };
 
+    // --- smoke test button ---
+    addAndMakeVisible(smokeButton);
     smokeButton.onClick = [this]()
         {
             audioProcessor.requestLlmSmokeTest();
-            statusLabel.setText("Running smoke test...", juce::dontSendNotification);
+
+            logEditor.moveCaretToEnd();
+            logEditor.insertTextAtCaret("[UI] Smoke test requested...\n");
         };
 
-    startTimerHz(10); // poll status 10 Hz
+    // --- copy log button ---
+    addAndMakeVisible(copyButton);
+    copyButton.onClick = [this]()
+        {
+            copyLogToClipboard();
+        };
+
+    // --- log editor setup ---
+    addAndMakeVisible(logEditor);
+    logEditor.setMultiLine(true);
+    logEditor.setReadOnly(true);
+    logEditor.setScrollbarsShown(true);
+    logEditor.setCaretVisible(false);
+    logEditor.setPopupMenuEnabled(true); // let user right-click/copy too
+#if JUCE_MAJOR_VERSION >= 8
+    logEditor.setFont(juce::FontOptions(14.0f));
+#else
+    logEditor.setFont(juce::Font(14.0f));
+#endif
+    logEditor.setColour(juce::TextEditor::backgroundColourId, juce::Colours::black);
+    logEditor.setColour(juce::TextEditor::textColourId, juce::Colours::white);
+    logEditor.setColour(juce::TextEditor::outlineColourId, juce::Colours::darkgrey);
+    logEditor.setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::yellow.withAlpha(0.4f));
+    logEditor.setScrollToShowCursor(false);
+
+    // seed the log box
+    {
+        juce::String intro;
+        intro << "LLMidi - LLM smoke test panel\n"
+            << "No model loaded yet.\n\n";
+        logEditor.setText(intro, juce::dontSendNotification);
+    }
+
+    // poll the processor / background thread ~10 Hz
+    startTimerHz(10);
 }
 
-LLMidiAudioProcessorEditor::~LLMidiAudioProcessorEditor() {}
+LLMidiAudioProcessorEditor::~LLMidiAudioProcessorEditor()
+{
+    // timer auto-stops in destructor
+}
 
 void LLMidiAudioProcessorEditor::paint(juce::Graphics& g)
 {
     g.fillAll(getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId));
-    g.setColour(juce::Colours::white);
+
+#if JUCE_MAJOR_VERSION >= 8
     g.setFont(juce::FontOptions(16.0f));
-    g.drawFittedText("LLMidi - LLM smoke test", getLocalBounds().removeFromTop(24),
+#else
+    g.setFont(juce::Font(16.0f));
+#endif
+    g.setColour(juce::Colours::white);
+
+    auto headerArea = getLocalBounds().removeFromTop(24);
+    g.drawFittedText("LLMidi - LLM smoke test", headerArea,
         juce::Justification::centred, 1);
 }
 
@@ -59,25 +106,71 @@ void LLMidiAudioProcessorEditor::resized()
 {
     auto r = getLocalBounds().reduced(10);
 
-    auto top = r.removeFromTop(40);
-    loadButton.setBounds(top.removeFromLeft(160).reduced(0, 6));
-    smokeButton.setBounds(top.removeFromLeft(140).reduced(10, 6));
+    // header already painted in paint(), so start layout below it
+    r.removeFromTop(30); // spacing under title
 
-    r.removeFromTop(4);
-    statusLabel.setBounds(r.removeFromTop(80));
+    auto buttonRow = r.removeFromTop(30);
+
+    // lay out buttons horizontally:
+    // [Load Model...] [Run Smoke Test] [Copy Log]
+    auto b = buttonRow;
+    auto eachW = b.getWidth() / 3;
+
+    loadButton.setBounds(b.removeFromLeft(eachW).reduced(2));
+    smokeButton.setBounds(b.removeFromLeft(eachW).reduced(2));
+    copyButton.setBounds(b.removeFromLeft(eachW).reduced(2));
+
+    r.removeFromTop(10);
+
+    // remaining area = log editor
+    logEditor.setBounds(r);
 }
 
 void LLMidiAudioProcessorEditor::timerCallback()
 {
-    // Show generator status and last error if any
-    juce::String s;
+    // Build status text from processor
+    // We'll show top status first, then full rolling log from bg thread
+    juce::String statusTop;
+    statusTop << (audioProcessor.isModelReady() ? "Model ready.\n" : "Model not ready.\n");
 
-    s << (audioProcessor.isModelReady() ? "Model ready." : "Model not ready.");
-    auto last = audioProcessor.getLlmStatus();
-    if (last.isNotEmpty())
+    // Add backgroundGenerator's rolling log
+    // This is already limited to ~10 lines in BackgroundGenerator,
+    // but now that we want full scroll, let's just append every poll.
+    // We'll keep the editor text growing.
+    juce::String bgLog = audioProcessor.getLlmLog(); // this calls getLogText()
+
+    // We'll maintain a cached tail to avoid spamming duplicates.
+    // Easiest approach: just replace whole content each tick, and keep caret at end if user isn't actively scrolling.
+    // For now let's just replace; that's simpler and guarantees we see everything.
+
+    juce::String combined;
+    combined << statusTop
+        << "\n--- Background log ---\n"
+        << bgLog
+        << "\n";
+
+    // only update if changed to avoid resetting scroll all the time
+    if (logEditor.getText() != combined)
     {
-        s << "  " << last;
-    }
+        const bool userIsAtEnd = (logEditor.getCaretPosition() >= logEditor.getTotalNumChars() - 1);
 
-    statusLabel.setText(s, juce::dontSendNotification);
+        logEditor.setText(combined, juce::dontSendNotification);
+
+        if (userIsAtEnd)
+        {
+            // scroll to bottom politely
+            logEditor.moveCaretToEnd();
+            logEditor.scrollEditorToPositionCaret(0, logEditor.getCaretRectangle().getY());
+        }
+    }
+}
+
+void LLMidiAudioProcessorEditor::copyLogToClipboard()
+{
+    // Copy whatever is currently in the TextEditor
+    juce::SystemClipboard::copyTextToClipboard(logEditor.getText());
+
+    // Give tiny UI feedback (non-blocking, in log box itself)
+    logEditor.moveCaretToEnd();
+    logEditor.insertTextAtCaret("[UI] Log copied to clipboard.\n");
 }

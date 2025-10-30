@@ -69,12 +69,14 @@ public:
     {
         while (!threadShouldExit())
         {
-            workEvent.wait(-1); // block until signaled
+            workEvent.wait(-1);
             if (threadShouldExit()) break;
 
-            // 1) Handle any pending model load or smoke test first
+            // --- 1) handle model load + capture smoke request, under lock
+            bool doSmoke = false;
             {
                 const juce::ScopedLock sl(modelLock);
+
                 if (pendingModelLoad)
                 {
                     pendingModelLoad = false;
@@ -85,49 +87,77 @@ public:
                     std::string err;
                     const bool ok = runner->loadModel(pendingModelPath, pendingCtxParams, err);
                     modelReady.store(ok);
-                    lastLlmError = ok ? juce::String() : juce::String(err);
+
+                    if (ok)
+                    {
+                        lastLlmError = "Model load OK: " + juce::String(pendingModelPath.c_str());
+                        appendLog(lastLlmError);
+                    }
+                    else
+                    {
+                        lastLlmError = "Model load FAILED: " + juce::String(err);
+                        appendLog(lastLlmError);
+                    }
                 }
 
                 if (pendingSmokeTest)
                 {
                     pendingSmokeTest = false;
+                    doSmoke = true;
+                }
+            } // <-- release modelLock here
 
-                    if (!runner || !modelReady.load())
+            // --- 2) run smoke test outside the lock
+            if (doSmoke)
+            {
+                if (!runner || !modelReady.load())
+                {
+                    lastLlmError = "Smoke test: model not ready";
+                    appendLog(lastLlmError);
+                }
+                else
+                {
+                    appendLog("Smoke test: starting...");
+
+                    LlamaInferParams ip;
+                    ip.temperature = 0.9f;
+                    ip.top_p = 1.0f;
+                    ip.top_k = 0;
+                    ip.repeat_penalty = 1.0f;
+                    ip.max_tokens = 4;   // keep short
+                    ip.seed = 1234;
+                    ip.grammar.clear();
+
+                    const std::string prompt =
+                        "<s>[INST] <<SYS>>You are a helpful assistant.<</SYS>> "
+                        "Say only the word OK and nothing else. [/INST]";
+
+
+                    double tps = 0.0;
+                    std::string err;
+                    std::string out = runner->generate(prompt, ip, &tps, &err);
+
+                    if (!err.empty())
                     {
-                        lastLlmError = "Smoke test: model not ready";
+                        lastLlmError = juce::String("Smoke test failed: ") + juce::String(err);
+                        appendLog(lastLlmError);
+                    }
+                    else if (out.empty())
+                    {
+                        lastLlmError = "Smoke test: empty output.";
+                        appendLog(lastLlmError);
                     }
                     else
                     {
-                        LlamaInferParams ip;
-                        ip.temperature = 0.9f;   
-                        ip.top_p = 1.0f;
-                        ip.top_k = 0;
-                        ip.max_tokens = 8;
-                        ip.seed = 1234;
-                        const std::string prompt = "[INST] Reply with exactly: OK [/INST]";
-                        double tps = 0.0;
-                        std::string err;
-                        std::string out = runner->generate(prompt, ip, &tps, &err);
-
-                        if (!err.empty())
-                        {
-                            lastLlmError = juce::String("Smoke test failed: ") + juce::String(err);
-                        }
-                        else if (out.empty())
-                        {
-                            lastLlmError = "Smoke test produced empty output (try grammar OK again or higher temp).";
-                        }
-                        else
-                        {
-                            juce::String shown = juce::String(out.substr(0, 64).c_str());
-                            lastLlmError = juce::String("Smoke test OK, tps=") + juce::String(tps, 2)
-                                + ", out: " + shown;
-                        }
+                        juce::String shown = juce::String(out.substr(0, 64).c_str());
+                        lastLlmError = juce::String("Smoke test OK, tps=") + juce::String(tps, 2)
+                            + ", out: " + shown;
+                        appendLog(lastLlmError);
                     }
                 }
             }
 
-            // 2) Snapshot any pending build request
+            // --- 3) timeline build (unchanged)
             bool doWork = false;
             llmidi::Sequence localSeq;
             double localStartPPQ = 0.0;
@@ -148,7 +178,6 @@ public:
             if (!doWork)
                 continue;
 
-            // 3) Build a fresh timeline from the provided Sequence
             auto mutableTimeline = std::make_shared<EventTimeline>();
 
             MidiScheduler sched;
@@ -166,12 +195,18 @@ public:
                 ? localStartPPQ
                 : mutableTimeline->events.back().ppq;
 
-            // 4) Publish atomically as const
             std::shared_ptr<const EventTimeline> timeline = mutableTimeline;
             std::atomic_store_explicit(&currentTimeline, timeline, std::memory_order_release);
         }
     }
-
+    juce::String getLogText() const
+    {
+        const juce::ScopedLock sl(logLock);
+        juce::String combined;
+        for (auto& line : logLines)
+            combined << line << "\n";
+        return combined.trimEnd();
+    }
 private:
     void notifyWorkAvailable()
     {
@@ -204,4 +239,18 @@ private:
     bool pendingSmokeTest = false;
     std::string pendingModelPath;
     LlamaContextParams pendingCtxParams;
+    void appendLog(const juce::String& line)
+    {
+        const juce::ScopedLock sl(logLock);
+        logLines.add(line);
+
+        // keep only the last ~10 lines
+        const int maxLines = 200;
+        while (logLines.size() > maxLines)
+            logLines.remove(0);
+    }
+    // ===== Debug / status log =====
+    juce::CriticalSection logLock;
+    juce::StringArray logLines;
+
 };

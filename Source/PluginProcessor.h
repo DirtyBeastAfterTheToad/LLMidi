@@ -44,6 +44,8 @@ public:
     // For editor status polling
     bool isModelReady() const;
     juce::String getLlmStatus() const;
+    juce::String getLlmLog() const;
+
 private:
     // Host timing cache
     double sr = 44100.0;
