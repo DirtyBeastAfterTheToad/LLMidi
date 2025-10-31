@@ -45,7 +45,11 @@ public:
     bool isModelReady() const;
     juce::String getLlmStatus() const;
     juce::String getLlmLog() const;
-
+    void requestLlmGeneratePattern(const std::string& naturalPrompt,
+        int bars,
+        int stepsPerBar,
+        int defaultVelocity,
+        int channel);
 private:
     // Host timing cache
     double sr = 44100.0;
@@ -80,4 +84,5 @@ private:
     void flushAllActiveNotes(juce::MidiBuffer& midi, int sampleOffset);
     bool wasPlaying = false;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LLMidiAudioProcessor)
+    void refreshSequenceFromGeneratorIfAvailable();
 };

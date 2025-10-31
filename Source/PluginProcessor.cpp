@@ -39,8 +39,8 @@ LLMidiAudioProcessor::LLMidiAudioProcessor()
 void LLMidiAudioProcessor::requestLoadModelFromFile(const juce::File& file)
 {
     LlamaContextParams p;
-    p.n_ctx = 2048;  // safe default
-    p.n_batch = 512;   // safe default for CPU
+    p.n_ctx = 1024;
+    p.n_batch = 2048;
     p.seed = 12345;
 
     generator.requestLoadModel(file.getFullPathName().toStdString(), p);
@@ -63,7 +63,24 @@ juce::String LLMidiAudioProcessor::getLlmStatus() const
 {
     return generator.getLastLlmError();
 }
+void LLMidiAudioProcessor::refreshSequenceFromGeneratorIfAvailable()
+{
+    llmidi::Sequence newSeq;
+    if (generator.getLatestGeneratedSequence(newSeq))
+    {
+        const bool shapeChanged =
+            (newSeq.bars != sequence.bars) ||
+            (newSeq.stepsPerBar != sequence.stepsPerBar);
 
+        sequence = newSeq;
+
+        haveSchedule = false;   // force BackgroundGenerator to rebuild timeline at host bar
+        didCatchUp = false;   // so we emit fresh NoteOns for the new clip
+
+        if (shapeChanged)
+            activeNotes.clear();
+    }
+}
 LLMidiAudioProcessor::~LLMidiAudioProcessor() {}
 
 const juce::String LLMidiAudioProcessor::getName() const { return JucePlugin_Name; }
@@ -196,7 +213,7 @@ void LLMidiAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
 
     // from here we are playing
     wasPlaying = true;
-
+    refreshSequenceFromGeneratorIfAvailable();
     if (!haveSchedule)
         scheduleNowAtCurrentBar(pos); // requests build on the background thread
 
@@ -255,7 +272,14 @@ void LLMidiAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
         }
     }
 }
-
+void LLMidiAudioProcessor::requestLlmGeneratePattern(const std::string& naturalPrompt,
+    int bars,
+    int stepsPerBar,
+    int defaultVelocity,
+    int channel)
+{
+    generator.requestLlmGeneratePattern(naturalPrompt, bars, stepsPerBar, defaultVelocity, channel);
+}
 
 // Scan the timeline at curPPQ and emit NoteOns for any notes that are already "on".
 void LLMidiAudioProcessor::performCatchUpIfNeeded(const juce::AudioPlayHead::CurrentPositionInfo& pos,

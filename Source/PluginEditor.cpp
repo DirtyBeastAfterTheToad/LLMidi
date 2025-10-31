@@ -50,7 +50,25 @@ LLMidiAudioProcessorEditor::LLMidiAudioProcessorEditor(LLMidiAudioProcessor& p)
         {
             copyLogToClipboard();
         };
+    // --- generate pattern button ---
+    addAndMakeVisible(genButton);
+    genButton.onClick = [this]()
+        {
+            // Minimal starting prompt; you can replace with a TextEditor later
+            const std::string naturalPrompt =
+                "Nostalgic pluck arpeggio in E minor, light syncopation, leave space.";
 
+            // For now, fixed grid; we’ll later infer from clip/note length
+            const int bars = 8;
+            const int stepsPerBar = 8;
+            const int defaultVel = 96;
+            const int channel = 0;
+
+            audioProcessor.requestLlmGeneratePattern(naturalPrompt, bars, stepsPerBar, defaultVel, channel);
+
+            logEditor.moveCaretToEnd();
+            logEditor.insertTextAtCaret("[UI] Generate pattern requested...\n");
+        };
     // --- log editor setup ---
     addAndMakeVisible(logEditor);
     logEditor.setMultiLine(true);
@@ -114,12 +132,12 @@ void LLMidiAudioProcessorEditor::resized()
     // lay out buttons horizontally:
     // [Load Model...] [Run Smoke Test] [Copy Log]
     auto b = buttonRow;
-    auto eachW = b.getWidth() / 3;
+    auto eachW = b.getWidth() / 4;
 
     loadButton.setBounds(b.removeFromLeft(eachW).reduced(2));
     smokeButton.setBounds(b.removeFromLeft(eachW).reduced(2));
     copyButton.setBounds(b.removeFromLeft(eachW).reduced(2));
-
+    genButton.setBounds(b.removeFromLeft(eachW).reduced(2));
     r.removeFromTop(10);
 
     // remaining area = log editor

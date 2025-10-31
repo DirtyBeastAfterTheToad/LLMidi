@@ -27,7 +27,7 @@ private:
     juce::TextButton loadButton{ "Load Model..." };
     juce::TextButton smokeButton{ "Run Smoke Test" };
     juce::TextButton copyButton{ "Copy Log" };
-
+    juce::TextButton genButton{ "Generate Pattern" };
     // Multiline scrollable log output
     juce::TextEditor logEditor;
 

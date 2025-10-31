@@ -59,8 +59,8 @@ bool LlamaRunner::loadModel(const std::string& modelPath,
     llama_context_params cparams = llama_context_default_params();
     cparams.n_ctx = (uint32_t)p.n_ctx;
     cparams.n_batch = (uint32_t)p.n_batch;
-    cparams.n_threads = 0;          // 0 lets lib pick; set if you want
-    cparams.n_threads_batch = 0;
+    cparams.n_threads = std::max(1u, std::thread::hardware_concurrency());
+    cparams.n_threads_batch = cparams.n_threads;
     cparams.embeddings = false;
 
     impl->model = llama_model_load_from_file(modelPath.c_str(), mparams);
@@ -72,6 +72,13 @@ bool LlamaRunner::loadModel(const std::string& modelPath,
     impl->vocab = llama_model_get_vocab(impl->model);
     impl->n_ctx = (int)cparams.n_ctx;
     impl->seed = (p.seed >= 0 ? p.seed : 12345);
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        loadedModelPath_.clear();
+        loadedModelPath_ = modelPath;
+        modelLoaded_ = true;
+    }
+
     return true;
 }
 
@@ -80,129 +87,77 @@ void LlamaRunner::unload() {
     if (impl->ctx) { llama_free(impl->ctx);   impl->ctx = nullptr; }
     if (impl->model) { llama_model_free(impl->model); impl->model = nullptr; }
     impl->vocab = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        loadedModelPath_.clear();
+        modelLoaded_ = false;
+    }
     llama_backend_free();
 }
-static std::string toHexDebug(const std::string& s) {
-    static const char* hex = "0123456789ABCDEF";
-    std::string out;
-    out.reserve(s.size() * 3);
-    for (unsigned char c : s) {
-        out.push_back(hex[c >> 4]);
-        out.push_back(hex[c & 0xF]);
-        out.push_back(' ');
-    }
-    return out;
+std::string LlamaRunner::getLoadedModelPath() const {
+    std::lock_guard<std::mutex> lock(stateMutex_);
+    return loadedModelPath_;
 }
 std::string LlamaRunner::generate(const std::string& prompt,
     const LlamaInferParams& ip,
     double* outTokensPerSec,
     std::string* errorOut)
 {
-    auto appendDbg = [&](const std::string& line)
-        {
-            if (errorOut)
-            {
-                if (errorOut && errorOut->empty())
-                    *errorOut += "\n";
-                *errorOut += line;
-            }
+    auto log = [&](const std::string& line) {
+        if (!errorOut) return;
+        if (errorOut->empty()) *errorOut += "";
+        *errorOut += (errorOut->empty() ? "" : "\n");
+        *errorOut += line;
         };
 
-    if (!isLoaded())
-    {
-        if (errorOut) *errorOut = "Model not loaded";
-        return {};
-    }
+    if (!isLoaded()) { if (errorOut) *errorOut = "Model not loaded"; return {}; }
 
     std::lock_guard<std::mutex> lock(impl->mtx);
 
     const auto* vocab = impl->vocab;
-    if (!vocab)
-    {
-        if (errorOut) *errorOut = "No vocab";
-        return {};
-    }
+    if (!vocab) { if (errorOut) *errorOut = "No vocab"; return {}; }
+
+    using clock = std::chrono::steady_clock;
+    const auto tAllStart = clock::now();
 
     // ---- 1) Tokenize prompt ----
     const bool add_special = true;
     const bool parse_special = false;
 
-    int32_t need = llama_tokenize(
-        vocab,
-        prompt.c_str(),
-        (int32_t)prompt.size(),
-        nullptr,
-        0,
-        add_special,
-        parse_special);
-
-    if (need == INT32_MIN)
-    {
-        if (errorOut) *errorOut = "tokenize overflow";
-        return {};
-    }
-    if (need < 0)
-        need = -need;
+    int32_t need = llama_tokenize(vocab, prompt.c_str(), (int32_t)prompt.size(),
+        nullptr, 0, add_special, parse_special);
+    if (need == INT32_MIN) { if (errorOut) *errorOut = "tokenize overflow"; return {}; }
+    if (need < 0) need = -need;
 
     std::vector<llama_token> prompt_tokens((size_t)need);
-
-    int32_t got = llama_tokenize(
-        vocab,
-        prompt.c_str(),
-        (int32_t)prompt.size(),
-        prompt_tokens.data(),
-        (int32_t)prompt_tokens.size(),
-        add_special,
-        parse_special);
-
-    if (got <= 0)
-    {
-        if (errorOut) *errorOut = "tokenize failed";
-        return {};
-    }
-
+    int32_t got = llama_tokenize(vocab, prompt.c_str(), (int32_t)prompt.size(),
+        prompt_tokens.data(), (int32_t)prompt_tokens.size(),
+        add_special, parse_special);
+    if (got <= 0) { if (errorOut) *errorOut = "tokenize failed"; return {}; }
     prompt_tokens.resize((size_t)got);
 
-    if (prompt_tokens.empty())
-    {
-        if (errorOut) *errorOut = "tokenize() returned 0 tokens";
-        return {};
-    }
-
-    if ((int)prompt_tokens.size() >= impl->n_ctx)
-    {
-        if (errorOut) *errorOut = "prompt too long for n_ctx";
-        return {};
-    }
+    if (prompt_tokens.empty()) { if (errorOut) *errorOut = "tokenize() returned 0 tokens"; return {}; }
+    if ((int)prompt_tokens.size() >= impl->n_ctx) { if (errorOut) *errorOut = "prompt too long for n_ctx"; return {}; }
 
     {
-        std::string dbg = "Prompt: \"" + prompt + "\"\n";
-        dbg += "Tokenized prompt -> " + std::to_string(prompt_tokens.size()) + " tokens.\n";
-        dbg += "First up to 16 token IDs: ";
-        for (size_t i = 0; i < prompt_tokens.size() && i < 16; ++i)
-            dbg += std::to_string(prompt_tokens[i]) + " ";
-        appendDbg(dbg);
+        std::string dbg = "Prompt tokens: " + std::to_string(prompt_tokens.size());
+        log(dbg);
+        dbg = "First token IDs (up to 12): ";
+        for (size_t i = 0; i < prompt_tokens.size() && i < 12; ++i) dbg += std::to_string(prompt_tokens[i]) + (i + 1 < 12 ? " " : "");
+        log(dbg);
     }
 
-    // ---- 2) Feed prompt tokens into llama_decode ----
+    // ---- 2) Feed prompt ----
     int32_t posAbs = 0;
-    for (size_t i = 0; i < prompt_tokens.size(); ++i)
-    {
+    for (size_t i = 0; i < prompt_tokens.size(); ++i) {
         llama_token tok = prompt_tokens[i];
 
-        llama_token  tok_arr[1];
-        llama_pos    pos_arr[1];
-        int32_t      nseq_arr[1];
-        llama_seq_id sid_val[1];
-        llama_seq_id* sid_ptrs[1];
-        int8_t       logits_arr[1];
-
-        tok_arr[0] = tok;
-        pos_arr[0] = (llama_pos)posAbs;
-        nseq_arr[0] = 1;
-        sid_val[0] = 0;
-        sid_ptrs[0] = &sid_val[0];
-        logits_arr[0] = (i == prompt_tokens.size() - 1) ? 1 : 0; // only last prompt token asks logits
+        llama_token  tok_arr[1] = { tok };
+        llama_pos    pos_arr[1] = { (llama_pos)posAbs };
+        int32_t      nseq_arr[1] = { 1 };
+        llama_seq_id sid_val[1] = { 0 };
+        llama_seq_id* sid_ptrs[1] = { &sid_val[0] };
+        int8_t       logits_arr[1] = { (int8_t)((i == prompt_tokens.size() - 1) ? 1 : 0) };
 
         llama_batch batchPrompt;
         batchPrompt.n_tokens = 1;
@@ -213,276 +168,99 @@ std::string LlamaRunner::generate(const std::string& prompt,
         batchPrompt.seq_id = sid_ptrs;
         batchPrompt.logits = logits_arr;
 
-        int32_t dec = llama_decode(impl->ctx, batchPrompt);
-        if (dec < 0)
-        {
-            appendDbg("llama_decode(prompt) failed at pos " + std::to_string(i));
-            if (errorOut && errorOut->empty())
-                *errorOut = "llama_decode(prompt) failed";
+        if (llama_decode(impl->ctx, batchPrompt) < 0) {
+            log("llama_decode(prompt) failed at pos " + std::to_string(i));
+            if (errorOut && errorOut->empty()) *errorOut = "llama_decode(prompt) failed";
             return {};
         }
-
         posAbs += 1;
     }
 
-    appendDbg("Prompt ingested OK. Starting sampling...");
+    const auto tAfterPrompt = clock::now();
+    log("Prompt ingested OK. Starting sampling...");
 
-    // ---- 3) Build sampler chain ----
+    // ---- 3) Sampler chain ----
     auto sparams = llama_sampler_chain_default_params();
     llama_sampler* chain = llama_sampler_chain_init(sparams);
 
-    if (ip.repeat_penalty != 1.0f)
-    {
-        llama_sampler_chain_add(chain, llama_sampler_init_penalties(
-            64,
-            ip.repeat_penalty,
-            0.0f,
-            0.0f));
+    if (ip.repeat_penalty != 1.0f) {
+        llama_sampler_chain_add(chain, llama_sampler_init_penalties(64, ip.repeat_penalty, 0.0f, 0.0f));
     }
+    if (ip.top_k > 0) llama_sampler_chain_add(chain, llama_sampler_init_top_k(ip.top_k));
+    if (ip.top_p > 0.0f && ip.top_p < 1.0f) llama_sampler_chain_add(chain, llama_sampler_init_top_p(ip.top_p, 1));
 
-    if (ip.top_k > 0)
-        llama_sampler_chain_add(chain, llama_sampler_init_top_k(ip.top_k));
-
-    if (ip.top_p > 0.0f && ip.top_p < 1.0f)
-        llama_sampler_chain_add(chain, llama_sampler_init_top_p(ip.top_p, 1));
-
-    if (ip.temperature > 0.0f)
-    {
+    if (ip.temperature > 0.0f) {
         llama_sampler_chain_add(chain, llama_sampler_init_temp(ip.temperature));
-
-        const uint32_t seedUse = (ip.seed >= 0)
-            ? (uint32_t)ip.seed
-            : (uint32_t)impl->seed;
-
+        const uint32_t seedUse = (ip.seed >= 0) ? (uint32_t)ip.seed : (uint32_t)impl->seed;
         llama_sampler_chain_add(chain, llama_sampler_init_dist(seedUse));
     }
-    else
-    {
+    else {
         llama_sampler_chain_add(chain, llama_sampler_init_greedy());
     }
 
-    if (!ip.grammar.empty())
-    {
+    if (!ip.grammar.empty()) {
         if (auto* g = llama_sampler_init_grammar(vocab, ip.grammar.c_str(), "root"))
             llama_sampler_chain_add(chain, g);
     }
 
-    // Bias away EOS for first token only
+    // Block EOS for the first token only
     const llama_token eos_tok = llama_vocab_eos(vocab);
-
-    llama_logit_bias lb;
-    lb.token = eos_tok;
-    lb.bias = -10.0f;
-
-    llama_sampler* eosBlocker = llama_sampler_init_logit_bias(
-        /*n_vocab*/      llama_vocab_n_tokens(vocab),
-        /*n_logit_bias*/ 1,
-        &lb
-    );
-
+    llama_logit_bias lb{ eos_tok, -10.0f };
+    llama_sampler* eosBlocker = llama_sampler_init_logit_bias(llama_vocab_n_tokens(vocab), 1, &lb);
     llama_sampler_chain_add(chain, eosBlocker);
     const int eosBlockerIndex = llama_sampler_chain_n(chain) - 1;
 
-    // seed repetition penalty etc. with prompt
-    for (auto t : prompt_tokens)
-        llama_sampler_accept(chain, t);
+    // seed penalties with prompt
+    for (auto t : prompt_tokens) llama_sampler_accept(chain, t);
 
     // ---- 4) Generation loop ----
     std::vector<llama_token> out_tokens;
     out_tokens.reserve((size_t)ip.max_tokens);
 
-    for (int32_t generated = 0; generated < ip.max_tokens; ++generated)
-    {
+    std::string stopReason = "max_tokens";
+    bool firstLogged = false;
+
+    const auto tGenStart = clock::now();
+
+    for (int32_t generated = 0; generated < ip.max_tokens; ++generated) {
         llama_token next_id = llama_sampler_sample(chain, impl->ctx, -1);
+        if (next_id == LLAMA_TOKEN_NULL) { stopReason = "sample_null"; break; }
 
-        {
-            std::string dbg = "gen step " + std::to_string(generated)
-                + ": sampled token id " + std::to_string(next_id);
-            appendDbg(dbg);
-        }
-
-        if (next_id == LLAMA_TOKEN_NULL)
-        {
-            appendDbg("sampler returned LLAMA_TOKEN_NULL, stopping.");
-            break;
-        }
-
-        // First token special handling / logging
-        if (generated == 0)
-        {
-            std::string firstDbg = "First sampled token id: " + std::to_string(next_id)
-                + " (EOS=" + std::to_string(eos_tok) + ")";
-            appendDbg(firstDbg);
-        }
-
-        // block EOS only for the first token, then remove bias sampler
-        if (generated == 0)
-        {
-            // if we still got eos_tok anyway, log that too
-            if (next_id == eos_tok)
-            {
-                appendDbg("First token == EOS (even with bias). We'll still continue and see what detokenize says.");
-            }
-
-            // remove eosBlocker from chain so later tokens can end naturally
+        if (!firstLogged) {
+            log("First token id: " + std::to_string(next_id) + " (EOS=" + std::to_string(eos_tok) + ")");
+            // remove eos blocker after first step
             llama_sampler* removed = llama_sampler_chain_remove(chain, eosBlockerIndex);
-            if (removed)
-            {
-                llama_sampler_free(removed);
-                appendDbg("Removed eosBlocker after first token.");
-            }
+            if (removed) llama_sampler_free(removed);
+            firstLogged = true;
         }
 
-        // accept the token into sampler state
         llama_sampler_accept(chain, next_id);
-
-        // stash it
         out_tokens.push_back(next_id);
 
-        // log partial text every step:
-        {
-            // show token piece
-            char pieceBuf[256];
-            const int pieceLen = llama_token_to_piece(
-                vocab,
-                next_id,
-                pieceBuf,
-                (int32_t)sizeof(pieceBuf) - 1,
-                /*lstrip*/0,
-                /*special*/true /* keep special tokens visible */);
+        if (next_id == eos_tok) { stopReason = "eos"; break; }
 
-            std::string pieceStr;
-            if (pieceLen > 0)
-            {
-                pieceBuf[pieceLen] = '\0';
-                pieceStr = pieceBuf;
-            }
-            else
-            {
-                pieceStr = "<unprintable>";
-            }
+        if (!ip.stop.empty()) {
+            // detok full so far (with specials unparsed) and check trailing stop strings
+            const bool remove_special = false, unparse_special = true;
+            int need3 = llama_detokenize(vocab, out_tokens.data(), (int32_t)out_tokens.size(),
+                nullptr, 0, remove_special, unparse_special);
+            if (need3 < 0) need3 = -need3;
+            std::string tmp; tmp.resize((size_t)need3);
+            int got3 = llama_detokenize(vocab, out_tokens.data(), (int32_t)out_tokens.size(),
+                &tmp[0], (int32_t)tmp.size(), remove_special, unparse_special);
+            if (got3 > 0) tmp.resize((size_t)got3);
 
-            // show detok of ALL so far (raw, keep specials)
-            std::string partialAll;
-            {
-                // reimplementation of detok_all with remove_special=false, unparse_special=true
-                const bool remove_special = false;
-                const bool unparse_special = true;
-
-                if (!out_tokens.empty())
-                {
-                    int need2 = llama_detokenize(
-                        vocab,
-                        out_tokens.data(),
-                        (int32_t)out_tokens.size(),
-                        nullptr,
-                        0,
-                        remove_special,
-                        unparse_special
-                    );
-                    if (need2 < 0) need2 = -need2;
-
-                    std::string tmp;
-                    tmp.resize((size_t)need2);
-
-                    int got2 = llama_detokenize(
-                        vocab,
-                        out_tokens.data(),
-                        (int32_t)out_tokens.size(),
-                        &tmp[0],
-                        (int32_t)tmp.size(),
-                        remove_special,
-                        unparse_special
-                    );
-                    if (got2 > 0) tmp.resize((size_t)got2);
-
-                    partialAll = tmp;
-                }
-                else
-                {
-                    partialAll = "";
-                }
-            }
-
-            std::string stepDbg;
-            stepDbg += "Partial[" + std::to_string(generated) + "] piece=\"" + pieceStr + "\""+"| hex : "+ toHexDebug(pieceStr);
-            stepDbg += " fullSoFar=\"" + partialAll + "\"" + "| hex : " + toHexDebug(partialAll);
-            appendDbg(stepDbg);
+            if (ends_with_any(tmp, ip.stop)) { stopReason = "stop_string"; break; }
         }
 
-        // stop if hit EOS (after first token we're allowed to end)
-        if (next_id == eos_tok)
+        // advance kv cache
         {
-            appendDbg("EOS token encountered, stopping generation.");
-            break;
-        }
-
-        // optional stop sequences
-        if (!ip.stop.empty())
-        {
-            // build current "fullSoFar" again (raw, specials included)
-            bool shouldStop = false;
-            {
-                const bool remove_special = false;
-                const bool unparse_special = true;
-
-                int need3 = llama_detokenize(
-                    vocab,
-                    out_tokens.data(),
-                    (int32_t)out_tokens.size(),
-                    nullptr,
-                    0,
-                    remove_special,
-                    unparse_special
-                );
-                if (need3 < 0) need3 = -need3;
-                std::string tmp3;
-                tmp3.resize((size_t)need3);
-                int got3 = llama_detokenize(
-                    vocab,
-                    out_tokens.data(),
-                    (int32_t)out_tokens.size(),
-                    &tmp3[0],
-                    (int32_t)tmp3.size(),
-                    remove_special,
-                    unparse_special
-                );
-                if (got3 > 0) tmp3.resize((size_t)got3);
-
-                for (const auto& stopStr : ip.stop)
-                {
-                    if (!stopStr.empty())
-                    {
-                        if (tmp3.size() >= stopStr.size() &&
-                            tmp3.compare(tmp3.size() - stopStr.size(), stopStr.size(), stopStr) == 0)
-                        {
-                            appendDbg("Matched stop string \"" + stopStr + "\" -> stopping gen.");
-                            shouldStop = true;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if (shouldStop)
-                break;
-        }
-
-        // advance KV cache with this token so logits update
-        {
-            llama_token  tok_arr[1];
-            llama_pos    pos_arr[1];
-            int32_t      nseq_arr[1];
-            llama_seq_id sid_val[1];
-            llama_seq_id* sid_ptrs[1];
-            int8_t       logits_arr[1];
-
-            tok_arr[0] = next_id;
-            pos_arr[0] = (llama_pos)posAbs;
-            nseq_arr[0] = 1;
-            sid_val[0] = 0;
-            sid_ptrs[0] = &sid_val[0];
-            logits_arr[0] = 1; // request logits for next step
+            llama_token  tok_arr[1] = { next_id };
+            llama_pos    pos_arr[1] = { (llama_pos)posAbs };
+            int32_t      nseq_arr[1] = { 1 };
+            llama_seq_id sid_val[1] = { 0 };
+            llama_seq_id* sid_ptrs[1] = { &sid_val[0] };
+            int8_t       logits_arr[1] = { 1 };
 
             llama_batch genBatch;
             genBatch.n_tokens = 1;
@@ -493,77 +271,52 @@ std::string LlamaRunner::generate(const std::string& prompt,
             genBatch.seq_id = sid_ptrs;
             genBatch.logits = logits_arr;
 
-            int32_t dec2 = llama_decode(impl->ctx, genBatch);
-            if (dec2 < 0)
-            {
-                appendDbg("llama_decode(genBatch) failed at gen step " + std::to_string(generated));
-                break;
-            }
+            if (llama_decode(impl->ctx, genBatch) < 0) { stopReason = "decode_fail"; break; }
         }
-
         posAbs += 1;
     }
 
-    // ---- 5) Cleanup samplers ----
+    const auto tGenEnd = clock::now();
+
+    // ---- 5) Cleanup ----
     llama_sampler_free(chain);
 
-    // ---- 6) Detokenize final output (raw, don't strip specials) ----
+    // ---- 6) Detokenize final (raw, keep specials unparsed) ----
     std::string finalText;
-    if (!out_tokens.empty())
-    {
-        const bool remove_special = false;
-        const bool unparse_special = true;
-
-        int needF = llama_detokenize(
-            vocab,
-            out_tokens.data(),
-            (int32_t)out_tokens.size(),
-            nullptr,
-            0,
-            remove_special,
-            unparse_special
-        );
+    if (!out_tokens.empty()) {
+        const bool remove_special = false, unparse_special = true;
+        int needF = llama_detokenize(vocab, out_tokens.data(), (int32_t)out_tokens.size(),
+            nullptr, 0, remove_special, unparse_special);
         if (needF < 0) needF = -needF;
         finalText.resize((size_t)needF);
-
-        int gotF = llama_detokenize(
-            vocab,
-            out_tokens.data(),
-            (int32_t)out_tokens.size(),
-            &finalText[0],
-            (int32_t)finalText.size(),
-            remove_special,
-            unparse_special
-        );
+        int gotF = llama_detokenize(vocab, out_tokens.data(), (int32_t)out_tokens.size(),
+            &finalText[0], (int32_t)finalText.size(), remove_special, unparse_special);
         if (gotF > 0) finalText.resize((size_t)gotF);
     }
-    else
-    {
-        finalText = "";
-    }
 
-    {
-        std::string dbg = "Final out_tokens.size() = " + std::to_string(out_tokens.size()) + "\n";
-        dbg += "Final detok (raw) = \"" + finalText + "\"";
-        dbg += "Final detok (hex) = \"" + toHexDebug( finalText) + "\"";
-        appendDbg(dbg);
+    // ---- 7) Timing + logs ----
+    const auto tAllEnd = clock::now();
+    const double msPrompt = std::chrono::duration<double, std::milli>(tAfterPrompt - tAllStart).count();
+    const double msGen = std::chrono::duration<double, std::milli>(tGenEnd - tGenStart).count();
+    const double msTotal = std::chrono::duration<double, std::milli>(tAllEnd - tAllStart).count();
 
-        if (finalText.empty())
-        {
-            dbg = "NOTE: final detokenized output is empty.";
-            appendDbg(dbg);
-        }
-    }
+    const int genTokens = (int)out_tokens.size();
+    const double tokPerSec = (msGen > 0.0) ? (genTokens * 1000.0 / msGen) : 0.0;
 
-    // ---- 7) Perf stats ----
-    if (outTokensPerSec)
-    {
-        const auto perf = llama_perf_context(impl->ctx);
-        double sec = perf.t_eval_ms / 1000.0;
-        int nEval = perf.n_eval;
-        *outTokensPerSec = (sec > 0.0 ? (double)nEval / sec : 0.0);
-    }
+    log(std::string("Stop reason: ") + stopReason);
+    log("Final tokens: " + std::to_string(genTokens));
 
+    // sanitize preview (single line, max 300 chars)
+    std::string preview = finalText;
+    for (char& c : preview) if (c == '\n' || c == '\r') c = ' ';
+    if (preview.size() > 500) preview.resize(500), preview += "...";
+    log("Final (preview): \"" + preview + "\"");
+
+    log("Time: total=" + std::to_string(msTotal / 1000.0) + "s, prompt=" + std::to_string(msPrompt / 1000.0) +
+        "s, gen=" + std::to_string(msGen / 1000.0) + "s");
+    log("Throughput: " + std::to_string(tokPerSec) + " tok/s");
+
+    if (outTokensPerSec) *outTokensPerSec = tokPerSec;
     return finalText;
 }
 

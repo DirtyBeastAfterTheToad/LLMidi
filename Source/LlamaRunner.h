@@ -2,7 +2,7 @@
 #include <string>
 #include <vector>
 #include <memory>
-
+#include <mutex>
 struct LlamaContextParams {
     int   n_ctx = 2048;
     int   n_batch = 512;
@@ -36,7 +36,7 @@ public:
         std::string& errorOut);
 
     void unload();
-
+    std::string getLoadedModelPath() const;
     bool isLoaded() const;
 
     // Synchronous. Call from your background worker only.
@@ -49,4 +49,7 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl;
+    bool modelLoaded_ = false;
+    mutable std::mutex stateMutex_;
+    std::string loadedModelPath_;
 };

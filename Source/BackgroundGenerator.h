@@ -7,6 +7,8 @@
 #include "MidiScheduler.h"
 #include "Timeline.h"
 #include "LlamaRunner.h"
+#include "LlmSequenceParser.h"
+#include "LlmGenAdapter.h"
 
 // Builds timelines off the audio thread and exposes the latest safely.
 // Also owns the LlamaRunner and handles model load + simple smoke tests.
@@ -65,6 +67,21 @@ public:
     bool isModelReady() const noexcept { return modelReady.load(); }
     juce::String getLastLlmError() const { return lastLlmError; }
 
+    void requestLlmGeneratePattern(const std::string& naturalPrompt,
+        int bars,
+        int stepsPerBar,
+        int defaultVelocity,
+        int channel)
+    {
+        const juce::ScopedLock sl(modelLock);
+        pendingGen = true;
+        pendingGenPrompt = naturalPrompt;
+        pendingGenBars = bars;
+        pendingGenSteps = stepsPerBar;
+        pendingGenDefaultVel = defaultVelocity;
+        pendingGenChannel = channel;
+        notifyWorkAvailable();
+    }
     void run() override
     {
         while (!threadShouldExit())
@@ -157,6 +174,226 @@ public:
                 }
             }
 
+            // --- 2b) capture pending pattern-gen outside lock
+            bool doGen = false;
+            std::string natPrompt;
+            int genBars = 8, genSteps = 8, genDefaultVel = 100, genChannel = 0;
+
+            {
+                const juce::ScopedLock sl(modelLock);
+                if (pendingGen) {
+                    pendingGen = false;
+                    doGen = true;
+                    natPrompt = pendingGenPrompt;
+                    genBars = pendingGenBars;
+                    genSteps = pendingGenSteps;
+                    genDefaultVel = pendingGenDefaultVel;
+                    genChannel = pendingGenChannel;
+                }
+            }
+
+            // --- 2c) run LLM pattern generation
+            if (doGen) {
+                if (!runner || !modelReady.load()) {
+                    appendLog("Pattern gen: model not ready");
+                }
+                else {
+                    appendLog("Pattern gen: starting...");
+
+                    // ---- Prepare task text
+                    std::string user = natPrompt;
+                    if (user.empty()) {
+                        user = "Nostalgic plucky arpeggio in E minor with space, light syncopation.";
+                    }
+
+                    // Core rules: *array-of-arrays only*, no objects/keys, strict step set
+                    std::ostringstream rules;
+                    rules
+                        << "You are a MIDI step sequencer.\n"
+                        << "Return ONLY a JSON array of " << genBars << " bars.\n"
+                        << "Each bar is a JSON array of exactly " << genSteps << " steps.\n"
+                        << "Each step MUST be exactly one of:\n"
+                        << "  \".\"            (rest)\n"
+                        << "  \"-\"            (sustain previous)\n"
+                        << "  \"NOTE\"         e.g. \"A#3\" or \"A#3-72\" (velocity 1..127)\n"
+                        << "  [\"NOTE\", ...]  chord; each NOTE may have -velocity too.\n"
+                        << "ABSOLUTELY NO objects, no keys, no prose, no comments, no code fences.\n"
+                        << "The top-level value MUST be an array of bars; each bar MUST be an array of steps.\n";
+
+                    // ---- Detect model family for prompt layout
+                    std::string modelPath;
+                    try {
+                        modelPath = runner->getLoadedModelPath(); 
+                    }
+                    catch (...) {
+                        modelPath.clear();
+                    }
+                    const juce::String mp(modelPath.c_str());
+                    const bool isPhi = mp.isNotEmpty() && mp.toLowerCase().contains("phi");
+
+                    // ---- Build the actual prompt per model
+                    std::ostringstream prompt;
+                    if (isPhi) {
+                        // Phi-3 chat format:
+                        // <|user|>\n...<|end|>\n<|assistant|>
+                        prompt << "<|user|>\n"
+                            << rules.str()
+                            << "\nTask: " << user << "\n"
+                            << "Return ONLY the JSON.\n"
+                            << "<|end|>\n"
+                            << "<|assistant|>";
+                    }
+                    else {
+                        // Mistral Instruct v0.3 format:
+                        // <s>[INST] <<SYS>>...rules...<</SYS>> ...user/task... [/INST]
+                        prompt << "<s>[INST] <<SYS>>"
+                            << rules.str()
+                            << "<</SYS>> "
+                            << "Task: " << user << " "
+                            << "Return ONLY the JSON. [/INST]";
+                    }
+
+                    // ---- Inference params (tight for JSON)
+                    LlamaInferParams ip;
+                    ip.temperature = 0.20f;
+                    ip.top_p = 0.90f;
+                    ip.top_k = 0;           // rely on nucleus only for stability
+                    ip.repeat_penalty = 1.05f;
+                    ip.max_tokens = 512;         // you said 512 is fine for 8 bars
+                    ip.seed = 12345;
+                    ip.grammar.clear();               // keep off for now; enable later if you add a JSON grammar
+                    ip.stop.clear();
+                    if (isPhi) {
+                        // Help the model terminate cleanly once it would switch roles
+                        ip.stop = { "<|end|>" };
+                    }
+                    else {
+                        // Mistral will usually emit </s> (EOS id=2). Adding it as a string stop is harmless.
+                        ip.stop = { "</s>" };
+                    }
+
+                    double tps = 0.0;
+                    std::string genLog; 
+                    const std::string raw = runner->generate(prompt.str(), ip, &tps, &genLog);
+
+                    if (!genLog.empty())
+                        appendLog("LLM dbg:\n" + juce::String(genLog));
+
+                    if (raw.empty())
+                    {
+                        appendLog("Pattern gen failed: empty raw output");
+                    }
+                    else
+                    {
+                        appendLog("Pattern gen raw size: " + juce::String((int)raw.size()));
+
+                        // ---- Minimal cleanup
+                        std::string trimmed = raw;
+                        while (!trimmed.empty() && std::isspace((unsigned char)trimmed.front())) trimmed.erase(trimmed.begin());
+                        while (!trimmed.empty() && std::isspace((unsigned char)trimmed.back()))  trimmed.pop_back();
+
+                        // ---- Parse JSON -> ParsedPhrase
+                        ParsedPhrase phrase;
+                        std::string perr;
+                        if (!parseJsonBars(trimmed, genDefaultVel, perr, phrase)) {
+                            appendLog("Parse error: " + juce::String(perr));
+
+                            // Try to slice between first '[' and last ']' to salvage a clean array
+                            auto l = trimmed.find('[');
+                            auto r = trimmed.rfind(']');
+                            if (l != std::string::npos && r != std::string::npos && r > l) {
+                                std::string salvage = trimmed.substr(l, r - l + 1);
+                                perr.clear();
+                                ParsedPhrase salvagePhrase;
+                                if (parseJsonBars(salvage, genDefaultVel, perr, salvagePhrase)) {
+                                    phrase = std::move(salvagePhrase);
+                                    appendLog("Recovered JSON by slicing outer brackets.");
+                                }
+                                else {
+                                    appendLog("Salvage also failed: " + juce::String(perr));
+                                }
+                            }
+                        }
+
+                        if (phrase.bars.empty()) {
+                            appendLog("Pattern gen: empty phrase after parse.");
+                        }
+                        else {
+
+                        auto summary = summarize(phrase);
+
+                        juce::String s;
+                        s << "Parsed "
+                            << summary.bars << " bars x "
+                            << summary.stepsPerBar << " steps; "
+                            << "notes=" << summary.totalPlayableNotes
+                            << ", playable steps=" << summary.totalPlayableSteps
+                            << ", sustains=" << summary.totalSustains
+                            << ", rests=" << summary.totalRests
+                            << "\nPreview: " << summary.shortPreview;
+                        appendLog(s);
+
+                        // ---- NEW: turn ParsedPhrase into a schedulable llmidi::Sequence
+                        llmidi::Sequence builtSeq =
+                            phraseToSequence(phrase,
+                                genDefaultVel,
+                                genChannel,
+                                /*fallbackBpm*/120);
+
+                        // Validate & log any issues
+                        {
+                            juce::String verr;
+                            if (!llmidi::validate(builtSeq, verr))
+                            {
+                                appendLog("Validation warning: " + verr);
+                            }
+                        }
+
+                        // Store it as "latestGeneratedSeq" so UI / processor can reuse
+                        {
+                            const juce::ScopedLock sl(latestSeqLock);
+                            latestGeneratedSeq = builtSeq;
+                            haveLatestGeneratedSeq.store(true);
+                        }
+
+                        // Immediately build and publish a new timeline for audition
+                        // We'll align it to bar 0 at PPQ 0.0 and assume 4 beats/bar for now.
+                        const double startPpq = 0.0;
+                        const double beatsPerBar = 4.0; // TODO: infer from host or prompt
+
+                        {
+                            // Build a fresh MidiScheduler (local stack)
+                            MidiScheduler schedTmp;
+                            schedTmp.buildFromSequence(builtSeq, startPpq, beatsPerBar);
+
+                            // Translate to an EventTimeline and publish atomically,
+                            // mirroring the code later in run() that handles requestBuild().
+                            auto mutableTimeline = std::make_shared<EventTimeline>();
+
+                            std::vector<const ScheduledMidi*> ptrs;
+                            schedTmp.getEventsInRange(startPpq, 1.0e12, ptrs);
+
+                            mutableTimeline->events.reserve(ptrs.size());
+                            for (auto* e : ptrs)
+                                mutableTimeline->events.push_back(*e);
+
+                            mutableTimeline->startPPQ = startPpq;
+                            mutableTimeline->endPPQ = mutableTimeline->events.empty()
+                                ? startPpq
+                                : mutableTimeline->events.back().ppq;
+
+                            std::shared_ptr<const EventTimeline> timeline = mutableTimeline;
+                            std::atomic_store_explicit(&currentTimeline, timeline, std::memory_order_release);
+                        }
+
+                        appendLog("Pattern gen: timeline published for audition.");
+                        }
+
+                    }
+                }
+            }
+
+
             // --- 3) timeline build (unchanged)
             bool doWork = false;
             llmidi::Sequence localSeq;
@@ -207,6 +444,13 @@ public:
             combined << line << "\n";
         return combined.trimEnd();
     }
+    bool getLatestGeneratedSequence(llmidi::Sequence& outSeq) const
+    {
+        if (!haveLatestGeneratedSeq.load()) return false;
+        const juce::ScopedLock sl(latestSeqLock);
+        outSeq = latestGeneratedSeq;
+        return true;
+    }
 private:
     void notifyWorkAvailable()
     {
@@ -249,8 +493,92 @@ private:
         while (logLines.size() > maxLines)
             logLines.remove(0);
     }
+    llmidi::Sequence latestGeneratedSeq;
+    std::atomic<bool> haveLatestGeneratedSeq{ false };
+    juce::CriticalSection latestSeqLock;
+    // Convert ParsedPhrase (LLM JSON) -> llmidi::Sequence so MidiScheduler can play it.
+    static llmidi::Sequence phraseToSequence(const ParsedPhrase& phrase,
+        int defaultVelocity,
+        int midiChannel,
+        int fallbackBpm = 120)
+    {
+        llmidi::Sequence seq;
+
+        const int numBars = phrase.barsCount();
+        const int stepsPerBar = phrase.stepsPerBar();
+
+        seq.bars = numBars;
+        seq.stepsPerBar = stepsPerBar;
+        seq.midiChannel = (uint8_t)juce::jlimit(0, 15, midiChannel);
+        seq.bpm = fallbackBpm;            // host tempo will override in playback but we keep a value
+        seq.key = "LLM draft";            // purely cosmetic for now
+
+        seq.data.resize((size_t)numBars);
+        for (int b = 0; b < numBars; ++b)
+        {
+            auto& outBar = seq.data[(size_t)b];
+            outBar.steps.reserve((size_t)stepsPerBar);
+
+            for (int s = 0; s < stepsPerBar; ++s)
+            {
+                const StepEvent& inStep = phrase.bars[(size_t)b][(size_t)s];
+
+                switch (inStep.kind)
+                {
+                case StepEvent::Kind::Rest:
+                {
+                    outBar.steps.push_back(llmidi::Step::makeRest());
+                    break;
+                }
+
+                case StepEvent::Kind::Sustain:
+                {
+                    outBar.steps.push_back(llmidi::Step::makeSustain());
+                    break;
+                }
+
+                case StepEvent::Kind::Notes:
+                {
+                    // Translate each PlayedNote {midi, velocity} -> llmidi::Note
+                    std::vector<llmidi::Note> ns;
+                    ns.reserve(inStep.notes.size());
+                    for (const auto& pn : inStep.notes)
+                    {
+                        llmidi::Note n;
+                        n.midi = juce::jlimit(0, 127, pn.midi);
+                        n.velocity = (uint8_t)juce::jlimit(1, 127, pn.velocity > 0 ? pn.velocity : defaultVelocity);
+                        ns.push_back(n);
+                    }
+
+                    // Decide Note vs Chord automatically
+                    outBar.steps.push_back(llmidi::Step::makeChord(std::move(ns)));
+                    break;
+                }
+                }
+            }
+        }
+        
+        // Sanity check / clamp in case the model lied
+        juce::String validationErr;
+        if (!llmidi::validate(seq, validationErr))
+        {
+            // We won’t throw; we’ll just log later. Sequence may be partially weird,
+            // but still playable. You could also choose to zero it out here.
+        }
+
+        return seq;
+    }
+
     // ===== Debug / status log =====
     juce::CriticalSection logLock;
     juce::StringArray logLines;
+
+
+    bool        pendingGen = false;
+    std::string pendingGenPrompt;
+    int         pendingGenBars = 8;
+    int         pendingGenSteps = 8;
+    int         pendingGenDefaultVel = 100;
+    int         pendingGenChannel = 0;
 
 };

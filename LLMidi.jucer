@@ -9,6 +9,13 @@
     <GROUP id="{6FC6456B-2AAE-36B4-2ED9-24588A207D63}" name="LLM">
       <FILE id="nBcMC2" name="LlamaRunner.cpp" compile="1" resource="0" file="Source/LlamaRunner.cpp"/>
       <FILE id="N5N5lV" name="LlamaRunner.h" compile="0" resource="0" file="Source/LlamaRunner.h"/>
+      <FILE id="g2WL7w" name="LlmGenAdapter.cpp" compile="1" resource="0"
+            file="Source/LlmGenAdapter.cpp"/>
+      <FILE id="iBMnSQ" name="LlmGenAdapter.h" compile="0" resource="0" file="Source/LlmGenAdapter.h"/>
+      <FILE id="PSZJtj" name="LlmSequenceParser.cpp" compile="1" resource="0"
+            file="Source/LlmSequenceParser.cpp"/>
+      <FILE id="qL3S0u" name="LlmSequenceParser.h" compile="0" resource="0"
+            file="Source/LlmSequenceParser.h"/>
       <FILE id="VfRNdh" name="sequence_json_grammar.h" compile="0" resource="0"
             file="Source/sequence_json_grammar.h"/>
     </GROUP>
