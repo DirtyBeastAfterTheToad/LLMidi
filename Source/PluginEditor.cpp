@@ -57,7 +57,7 @@ LLMidiAudioProcessorEditor::LLMidiAudioProcessorEditor(LLMidiAudioProcessor& p)
             const std::string naturalPrompt = promptEditor.getText().toStdString();
 
             const int bars = 8;
-            const int stepsPerBar = 8;
+            const int stepsPerBar = 4;
             const int defaultVel = 96;
             const int channel = 0;
 
