@@ -29,7 +29,7 @@ public:
 
     // Request a new build. Safe to call from the message thread or editor.
     // Stores the parameters and wakes the thread.
-    void requestBuild(const llmidi::Sequence& seq, double startBarPPQ, double beatsPerBar)
+    void requestBuild(const Sequence& seq, double startBarPPQ, double beatsPerBar)
     {
         const juce::ScopedLock sl(requestLock);
         pendingSeq = seq;
@@ -212,16 +212,41 @@ public:
                     // Core rules: *array-of-arrays only*, no objects/keys, strict step set
                     std::ostringstream rules;
                     rules
-                        << "You are a MIDI step sequencer.\n"
-                        << "Return ONLY a JSON array of " << genBars << " bars.\n"
-                        << "Each bar is a JSON array of exactly " << genSteps << " steps.\n"
-                        << "Each step MUST be exactly one of:\n"
-                        << "  \".\"            (rest)\n"
-                        << "  \"-\"            (sustain previous)\n"
-                        << "  \"NOTE\"         e.g. \"A#3\" or \"A#3-72\" (velocity 1..127)\n"
-                        << "  [\"NOTE\", ...]  chord; each NOTE may have -velocity too.\n"
-                        << "ABSOLUTELY NO objects, no keys, no prose, no comments, no code fences.\n"
-                        << "The top-level value MUST be an array of bars; each bar MUST be an array of steps.\n";
+                        << "You are a step-sequencer for expressive melodic phrases.\n"
+                        << "\n"
+                        << "GOAL:\n"
+                        << "- Create a MUSICAL riff, not just a metronomic pulse.\n"
+                        << "- The pattern should feel like something a human would actually play/arpeggiate.\n"
+                        << "- Leave intentional gaps (use \".\") so it breathes.\n"
+                        << "- Use sustains (\"-\") to hold notes or chords across multiple steps instead of re-triggering every step.\n"
+                        << "- It's OK to repeat motifs between bars, but add small variation (note choice, octave, rhythm).\n"
+                        << "- You may use chords (e.g. [\"A#3\",\"D#4\",\"F4\"]) on a step to imply harmony.\n"
+                        << "- You may move between low notes (bass-ish) and mid/high notes (melody-ish).\n"
+                        << "\n"
+                        << "FORMAT:\n"
+                        << "- Return ONLY a JSON array of exactly " << genBars << " bars.\n"
+                        << "- Each bar is a JSON array of exactly " << genSteps << " steps.\n"
+                        << "- So the top-level array MUST have length " << genBars << ".\n"
+                        << "- And each inner bar array MUST have length " << genSteps << ".\n"
+                        << "\n"
+                        << "ALLOWED STEP VALUES (each step MUST be exactly ONE of these):\n"
+                        << "  \".\"                     = rest / silence\n"
+                        << "  \"-\"                     = sustain/hold whatever was playing in the previous step (note or chord)\n"
+                        << "  \"NOTE\"                  = e.g. \"A#3\" or \"A#3-72\"  (velocity 1..127)\n"
+                        << "  [\"NOTE\", \"NOTE\", ...]  = chord. Each NOTE may include -velocity.\n"
+                        << "\n"
+                        << "STYLE REQUIREMENTS:\n"
+                        << "- Do NOT spam the exact same short note on every step.\n"
+                        << "- Prefer holding notes/chords across multiple steps using \"-\".\n"
+                        << "- Use rests \".\" to leave space. Not every step should fire.\n"
+                        << "- Rhythmic syncopation is good: off-beat hits, then sustain.\n"
+                        << "- Chords can sit and ring out. Melodic notes can answer between them.\n"
+                        << "\n"
+                        << "ABSOLUTELY DO NOT:\n"
+                        << "- Do NOT add any explanations, comments, code fences, or text outside the JSON.\n"
+                        << "- Do NOT include any objects (like {\"note\": ...}). Arrays ONLY.\n"
+                        << "- Do NOT change bar count (" << genBars << " bars) or steps per bar (" << genSteps << ").\n";
+
 
                     // ---- Detect model family for prompt layout
                     std::string modelPath;
@@ -337,7 +362,7 @@ public:
                         appendLog(s);
 
                         // ---- NEW: turn ParsedPhrase into a schedulable llmidi::Sequence
-                        llmidi::Sequence builtSeq =
+                        Sequence builtSeq =
                             phraseToSequence(phrase,
                                 genDefaultVel,
                                 genChannel,
@@ -346,7 +371,7 @@ public:
                         // Validate & log any issues
                         {
                             juce::String verr;
-                            if (!llmidi::validate(builtSeq, verr))
+                            if (!validate(builtSeq, verr))
                             {
                                 appendLog("Validation warning: " + verr);
                             }
@@ -399,7 +424,7 @@ public:
 
             // --- 3) timeline build (unchanged)
             bool doWork = false;
-            llmidi::Sequence localSeq;
+            Sequence localSeq;
             double localStartPPQ = 0.0;
             double localBeatsPerBar = 4.0;
 
@@ -447,7 +472,7 @@ public:
             combined << line << "\n";
         return combined.trimEnd();
     }
-    bool getLatestGeneratedSequence(llmidi::Sequence& outSeq) const
+    bool getLatestGeneratedSequence(Sequence& outSeq) const
     {
         if (!haveLatestGeneratedSeq.load()) return false;
         const juce::ScopedLock sl(latestSeqLock);
@@ -465,7 +490,7 @@ private:
     // ===== Pending build request =====
     double pendingBeatsPerBar = 4.0;
     juce::CriticalSection requestLock;
-    llmidi::Sequence pendingSeq;
+    Sequence pendingSeq;
     double pendingStartBarPPQ = 0.0;
     std::atomic<bool> hasPending{ false };
 
@@ -496,16 +521,16 @@ private:
         while (logLines.size() > maxLines)
             logLines.remove(0);
     }
-    llmidi::Sequence latestGeneratedSeq;
+    Sequence latestGeneratedSeq;
     std::atomic<bool> haveLatestGeneratedSeq{ false };
     juce::CriticalSection latestSeqLock;
     // Convert ParsedPhrase (LLM JSON) -> llmidi::Sequence so MidiScheduler can play it.
-    static llmidi::Sequence phraseToSequence(const ParsedPhrase& phrase,
+    static Sequence phraseToSequence(const ParsedPhrase& phrase,
         int defaultVelocity,
         int midiChannel,
         int fallbackBpm = 120)
     {
-        llmidi::Sequence seq;
+        Sequence seq;
 
         const int numBars = phrase.barsCount();
         const int stepsPerBar = phrase.stepsPerBar();
@@ -530,31 +555,31 @@ private:
                 {
                 case StepEvent::Kind::Rest:
                 {
-                    outBar.steps.push_back(llmidi::Step::makeRest());
+                    outBar.steps.push_back(Step::makeRest());
                     break;
                 }
 
                 case StepEvent::Kind::Sustain:
                 {
-                    outBar.steps.push_back(llmidi::Step::makeSustain());
+                    outBar.steps.push_back(Step::makeSustain());
                     break;
                 }
 
                 case StepEvent::Kind::Notes:
                 {
                     // Translate each PlayedNote {midi, velocity} -> llmidi::Note
-                    std::vector<llmidi::Note> ns;
+                    std::vector<Note> ns;
                     ns.reserve(inStep.notes.size());
                     for (const auto& pn : inStep.notes)
                     {
-                        llmidi::Note n;
+                        Note n;
                         n.midi = juce::jlimit(0, 127, pn.midi);
                         n.velocity = (uint8_t)juce::jlimit(1, 127, pn.velocity > 0 ? pn.velocity : defaultVelocity);
                         ns.push_back(n);
                     }
 
                     // Decide Note vs Chord automatically
-                    outBar.steps.push_back(llmidi::Step::makeChord(std::move(ns)));
+                    outBar.steps.push_back(Step::makeChord(std::move(ns)));
                     break;
                 }
                 }
@@ -563,7 +588,7 @@ private:
         
         // Sanity check / clamp in case the model lied
         juce::String validationErr;
-        if (!llmidi::validate(seq, validationErr))
+        if (!validate(seq, validationErr))
         {
             // We won’t throw; we’ll just log later. Sequence may be partially weird,
             // but still playable. You could also choose to zero it out here.

@@ -23,7 +23,7 @@ public:
 
     // Expand a sequence to absolute PPQ events starting at startBarPPQ.
     // startBarPPQ should be the PPQ position of the bar where bar 0 of the sequence begins.
-    void buildFromSequence(const llmidi::Sequence& seq,
+    void buildFromSequence(const Sequence& seq,
         double startBarPPQ,
         double beatsPerBar);
 

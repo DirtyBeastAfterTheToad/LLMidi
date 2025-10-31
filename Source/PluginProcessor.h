@@ -37,10 +37,11 @@ public:
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
 
-    const llmidi::Sequence& getSequence() const { return sequence; }
+    const Sequence& getSequence() const { return sequence; }
     void requestLoadModelFromFile(const juce::File& file);
     void requestLlmSmokeTest();
-
+    void requestBurnToMidi();
+    const Sequence& getLastGeneratedSequence() const { return lastBurnCandidate; }
     // For editor status polling
     bool isModelReady() const;
     juce::String getLlmStatus() const;
@@ -57,7 +58,7 @@ private:
     int spb = 512;
 
     // Core data and schedule
-    llmidi::Sequence sequence;
+    Sequence sequence;
 
     BackgroundGenerator generator;
     // Where in PPQ the sequence starts (aligned to bar)
@@ -86,4 +87,5 @@ private:
     bool wasPlaying = false;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LLMidiAudioProcessor)
     void refreshSequenceFromGeneratorIfAvailable();
+    Sequence lastBurnCandidate;
 };

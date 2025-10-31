@@ -30,7 +30,8 @@ private:
     juce::TextButton genButton{ "Generate Pattern" };
     juce::Label seedLabel{ "seedLabel", "Seed:" };
     juce::TextEditor seedEditor;
-    // Multiline scrollable log output
+    juce::Label promptLabel{ "promptLabel", "Prompt:" };
+    juce::TextEditor promptEditor;
     juce::TextEditor logEditor;
     
     // Async file chooser for model

@@ -17,7 +17,7 @@ static void addNote(std::vector<ScheduledMidi>& evts,
 
 // Build events from bars/steps. Each step has length = 1 step.
 // Sustains extend the previous note or chord by +1 step per sustain.
-void MidiScheduler::buildFromSequence(const llmidi::Sequence& seq,
+void MidiScheduler::buildFromSequence(const Sequence& seq,
     double startBarPPQ,
     double beatsPerBar)
 {

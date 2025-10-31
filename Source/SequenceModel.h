@@ -12,8 +12,6 @@
 // Core musical data model for LLMidi
 // -----------------------------------------------
 
-namespace llmidi
-{
     // What a step represents
     enum class StepType : uint8_t
     {
@@ -96,4 +94,3 @@ namespace llmidi
     // Returns true if shape is consistent: bars match, each bar has stepsPerBar steps,
     // notes in range 0..127, velocities 1..127, and sustains never start a bar (optional rule).
     bool validate(const Sequence& seq, juce::String& errorOut);
-}

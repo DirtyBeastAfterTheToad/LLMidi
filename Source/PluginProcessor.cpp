@@ -23,17 +23,17 @@ LLMidiAudioProcessor::LLMidiAudioProcessor()
     sequence.data.resize(2);
     // Bar 1: C4 held for full bar
     sequence.data[0].steps = {
-        llmidi::Step::makeChord({ {60,100} }), // C4
-        llmidi::Step::makeSustain(),
-        llmidi::Step::makeSustain(),
-        llmidi::Step::makeSustain()
+        Step::makeChord({ {60,100} }), // C4
+        Step::makeSustain(),
+        Step::makeSustain(),
+        Step::makeSustain()
     };
     // Bar 2: G3 held for full bar
     sequence.data[1].steps = {
-        llmidi::Step::makeChord({ {55,100} }), // G3
-        llmidi::Step::makeSustain(),
-        llmidi::Step::makeSustain(),
-        llmidi::Step::makeSustain()
+        Step::makeChord({ {55,100} }), // G3
+        Step::makeSustain(),
+        Step::makeSustain(),
+        Step::makeSustain()
     };
 }
 void LLMidiAudioProcessor::requestLoadModelFromFile(const juce::File& file)
@@ -63,9 +63,30 @@ juce::String LLMidiAudioProcessor::getLlmStatus() const
 {
     return generator.getLastLlmError();
 }
+void LLMidiAudioProcessor::requestBurnToMidi()
+{
+    // Pull the most recent generated sequence from the background thread.
+    // We already have generator.getLatestGeneratedSequence(), so reuse it.
+    Sequence seqOut;
+    if (generator.getLatestGeneratedSequence(seqOut))
+    {
+        // Store it so the host integration layer (to be written) can grab it.
+        lastBurnCandidate = seqOut;
+
+        // TODO: actual DAW write
+        // For now we'll just append to the log via background log, so user sees success.
+        // Easiest: just ask BackgroundGenerator to append a log line? We don't have a direct call,
+        // so we'll do UI-only feedback in burnButton.onClick() for now.
+    }
+    else
+    {
+        // No sequence yet. We could also stash an error flag if we want.
+    }
+}
+
 void LLMidiAudioProcessor::refreshSequenceFromGeneratorIfAvailable()
 {
-    llmidi::Sequence newSeq;
+    Sequence newSeq;
     if (generator.getLatestGeneratedSequence(newSeq))
     {
         const bool shapeChanged =

@@ -1,7 +1,5 @@
 #include "SequenceModel.h"
 
-namespace llmidi
-{
     static int baseSemitone(const juce::String& letter, const juce::String& accidental)
     {
         // Sharps as canonical; flats are mapped.
@@ -130,4 +128,3 @@ namespace llmidi
         }
         return true;
     }
-}

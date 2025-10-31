@@ -54,8 +54,7 @@ LLMidiAudioProcessorEditor::LLMidiAudioProcessorEditor(LLMidiAudioProcessor& p)
     addAndMakeVisible(genButton);
     genButton.onClick = [this]()
         {
-            const std::string naturalPrompt =
-                "Nostalgic pluck arpeggio in E minor, light syncopation, leave space.";
+            const std::string naturalPrompt = promptEditor.getText().toStdString();
 
             const int bars = 8;
             const int stepsPerBar = 8;
@@ -89,7 +88,7 @@ LLMidiAudioProcessorEditor::LLMidiAudioProcessorEditor(LLMidiAudioProcessor& p)
             logEditor.insertTextAtCaret("[UI] Generate pattern requested with seed "
                 + juce::String(seedToUse) + "\n");
         };
-
+    
     // --- log editor setup ---
     addAndMakeVisible(logEditor);
     logEditor.setMultiLine(true);
@@ -126,6 +125,26 @@ LLMidiAudioProcessorEditor::LLMidiAudioProcessorEditor(LLMidiAudioProcessor& p)
     seedEditor.setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::yellow.withAlpha(0.4f));
     seedEditor.setFont(juce::FontOptions(14.0f));
 
+    // --- prompt UI ---
+    addAndMakeVisible(promptLabel);
+    promptLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+    promptLabel.setFont(juce::FontOptions(14.0f));
+
+    addAndMakeVisible(promptEditor);
+    promptEditor.setMultiLine(true);
+    promptEditor.setReturnKeyStartsNewLine(true);
+    promptEditor.setScrollbarsShown(true);
+    promptEditor.setCaretVisible(true);
+    promptEditor.setPopupMenuEnabled(true);
+    promptEditor.setText(
+        "Nostalgic pluck arpeggio in E minor, light syncopation, leave space.",
+        juce::dontSendNotification);
+    promptEditor.setColour(juce::TextEditor::backgroundColourId, juce::Colours::black);
+    promptEditor.setColour(juce::TextEditor::textColourId, juce::Colours::white);
+    promptEditor.setColour(juce::TextEditor::outlineColourId, juce::Colours::darkgrey);
+    promptEditor.setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::yellow.withAlpha(0.4f));
+    promptEditor.setFont(juce::FontOptions(14.0f));
+
     // poll the processor / background thread ~10 Hz
     startTimerHz(10);
 }
@@ -139,11 +158,7 @@ void LLMidiAudioProcessorEditor::paint(juce::Graphics& g)
 {
     g.fillAll(getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId));
 
-#if JUCE_MAJOR_VERSION >= 8
     g.setFont(juce::FontOptions(16.0f));
-#else
-    g.setFont(juce::Font(16.0f));
-#endif
     g.setColour(juce::Colours::white);
 
     auto headerArea = getLocalBounds().removeFromTop(24);
@@ -155,33 +170,51 @@ void LLMidiAudioProcessorEditor::resized()
 {
     auto r = getLocalBounds().reduced(10);
 
-    // leave space for title
+    // leave space for title (paint() draws it)
     r.removeFromTop(30);
 
-    // first row: buttons
-    auto buttonRow = r.removeFromTop(30);
-    auto eachW = buttonRow.getWidth() / 4;
+    // --- Row 1: buttons ---
+    {
+        auto row = r.removeFromTop(30);
+        auto eachW = row.getWidth() / 4;
 
-    loadButton.setBounds(buttonRow.removeFromLeft(eachW).reduced(2));
-    smokeButton.setBounds(buttonRow.removeFromLeft(eachW).reduced(2));
-    copyButton.setBounds(buttonRow.removeFromLeft(eachW).reduced(2));
-    genButton.setBounds(buttonRow.removeFromLeft(eachW).reduced(2));
+        loadButton.setBounds(row.removeFromLeft(eachW).reduced(2));
+        smokeButton.setBounds(row.removeFromLeft(eachW).reduced(2));
+        copyButton.setBounds(row.removeFromLeft(eachW).reduced(2));
+        genButton.setBounds(row.removeFromLeft(eachW).reduced(2));
+    }
 
     r.removeFromTop(6);
 
-    // second row: seed label + editor (fixed width)
-    auto seedRow = r.removeFromTop(24);
-    auto labelW = 40;
-    auto editW = 80;
+    // --- Row 2: Seed ---
+    {
+        auto seedRow = r.removeFromTop(24);
 
-    seedLabel.setBounds(seedRow.removeFromLeft(labelW));
-    seedEditor.setBounds(seedRow.removeFromLeft(editW));
+        auto labelW = 40;
+        auto editW = 80;
+
+        seedLabel.setBounds(seedRow.removeFromLeft(labelW));
+        seedEditor.setBounds(seedRow.removeFromLeft(editW));
+    }
+
+    r.removeFromTop(6);
+
+    // --- Row 3: Prompt label + prompt editor box ---
+    {
+        auto labelRow = r.removeFromTop(18);
+        promptLabel.setBounds(labelRow.removeFromLeft(60));
+
+        // promptEditor takes a fixed chunk of vertical space
+        auto promptArea = r.removeFromTop(60); // 60px tall prompt box
+        promptEditor.setBounds(promptArea.reduced(0, 2));
+    }
 
     r.removeFromTop(10);
 
-    // remaining space: log
+    // --- Remaining: log ---
     logEditor.setBounds(r);
 }
+
 
 void LLMidiAudioProcessorEditor::timerCallback()
 {
