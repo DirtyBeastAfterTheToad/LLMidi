@@ -28,9 +28,11 @@ private:
     juce::TextButton smokeButton{ "Run Smoke Test" };
     juce::TextButton copyButton{ "Copy Log" };
     juce::TextButton genButton{ "Generate Pattern" };
+    juce::Label seedLabel{ "seedLabel", "Seed:" };
+    juce::TextEditor seedEditor;
     // Multiline scrollable log output
     juce::TextEditor logEditor;
-
+    
     // Async file chooser for model
     std::unique_ptr<juce::FileChooser> modelChooser;
 

@@ -8,6 +8,7 @@ struct LlamaRunner::Impl {
     llama_model* model = nullptr;
     llama_context* ctx = nullptr;
     const llama_vocab* vocab = nullptr;
+    llama_context_params ctxParams{};
     int n_ctx = 2048;
     int seed = 12345;
     std::mutex mtx;
@@ -62,7 +63,7 @@ bool LlamaRunner::loadModel(const std::string& modelPath,
     cparams.n_threads = std::max(1u, std::thread::hardware_concurrency());
     cparams.n_threads_batch = cparams.n_threads;
     cparams.embeddings = false;
-
+    impl->ctxParams = cparams;
     impl->model = llama_model_load_from_file(modelPath.c_str(), mparams);
     if (!impl->model) { err = "llama_model_load_from_file failed"; unload(); return false; }
 
@@ -114,9 +115,26 @@ std::string LlamaRunner::generate(const std::string& prompt,
 
     std::lock_guard<std::mutex> lock(impl->mtx);
 
-    const auto* vocab = impl->vocab;
-    if (!vocab) { if (errorOut) *errorOut = "No vocab"; return {}; }
+    {
+        if (impl->ctx) {
+            llama_free(impl->ctx);
+            impl->ctx = nullptr;
+        }
 
+        impl->ctx = llama_init_from_model(impl->model, impl->ctxParams);
+        if (!impl->ctx) {
+            if (errorOut) *errorOut = "llama_init_from_model (reinit) failed";
+            return {};
+        }
+
+        impl->vocab = llama_model_get_vocab(impl->model);
+    }
+
+    const auto* vocab = impl->vocab;
+    if (!vocab) {
+        if (errorOut) *errorOut = "No vocab";
+        return {};
+    }
     using clock = std::chrono::steady_clock;
     const auto tAllStart = clock::now();
 

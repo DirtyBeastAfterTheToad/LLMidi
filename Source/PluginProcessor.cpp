@@ -276,9 +276,10 @@ void LLMidiAudioProcessor::requestLlmGeneratePattern(const std::string& naturalP
     int bars,
     int stepsPerBar,
     int defaultVelocity,
-    int channel)
+    int channel,
+    int seed)
 {
-    generator.requestLlmGeneratePattern(naturalPrompt, bars, stepsPerBar, defaultVelocity, channel);
+    generator.requestLlmGeneratePattern(naturalPrompt, bars, stepsPerBar, defaultVelocity, channel, seed);
 }
 
 // Scan the timeline at curPPQ and emit NoteOns for any notes that are already "on".

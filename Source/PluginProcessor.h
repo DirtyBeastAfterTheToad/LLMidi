@@ -49,7 +49,8 @@ public:
         int bars,
         int stepsPerBar,
         int defaultVelocity,
-        int channel);
+        int channel,
+        int seed);
 private:
     // Host timing cache
     double sr = 44100.0;

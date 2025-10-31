@@ -71,7 +71,8 @@ public:
         int bars,
         int stepsPerBar,
         int defaultVelocity,
-        int channel)
+        int channel,
+        int seed)
     {
         const juce::ScopedLock sl(modelLock);
         pendingGen = true;
@@ -80,6 +81,7 @@ public:
         pendingGenSteps = stepsPerBar;
         pendingGenDefaultVel = defaultVelocity;
         pendingGenChannel = channel;
+        pendingGenSeed = seed;
         notifyWorkAvailable();
     }
     void run() override
@@ -177,7 +179,7 @@ public:
             // --- 2b) capture pending pattern-gen outside lock
             bool doGen = false;
             std::string natPrompt;
-            int genBars = 8, genSteps = 8, genDefaultVel = 100, genChannel = 0;
+            int genBars = 8, genSteps = 8, genDefaultVel = 100, genChannel = 0, genSeed = 12345;
 
             {
                 const juce::ScopedLock sl(modelLock);
@@ -189,6 +191,7 @@ public:
                     genSteps = pendingGenSteps;
                     genDefaultVel = pendingGenDefaultVel;
                     genChannel = pendingGenChannel;
+                    genSeed = pendingGenSeed;
                 }
             }
 
@@ -255,12 +258,12 @@ public:
 
                     // ---- Inference params (tight for JSON)
                     LlamaInferParams ip;
-                    ip.temperature = 0.20f;
+                    ip.temperature = 0.30f;
                     ip.top_p = 0.90f;
                     ip.top_k = 0;           // rely on nucleus only for stability
                     ip.repeat_penalty = 1.05f;
                     ip.max_tokens = 512;         // you said 512 is fine for 8 bars
-                    ip.seed = 12345;
+                    ip.seed = genSeed;
                     ip.grammar.clear();               // keep off for now; enable later if you add a JSON grammar
                     ip.stop.clear();
                     if (isPhi) {
@@ -580,5 +583,5 @@ private:
     int         pendingGenSteps = 8;
     int         pendingGenDefaultVel = 100;
     int         pendingGenChannel = 0;
-
+    int         pendingGenSeed = 12345;
 };

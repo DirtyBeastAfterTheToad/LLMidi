@@ -54,21 +54,42 @@ LLMidiAudioProcessorEditor::LLMidiAudioProcessorEditor(LLMidiAudioProcessor& p)
     addAndMakeVisible(genButton);
     genButton.onClick = [this]()
         {
-            // Minimal starting prompt; you can replace with a TextEditor later
             const std::string naturalPrompt =
                 "Nostalgic pluck arpeggio in E minor, light syncopation, leave space.";
 
-            // For now, fixed grid; we’ll later infer from clip/note length
             const int bars = 8;
             const int stepsPerBar = 8;
             const int defaultVel = 96;
             const int channel = 0;
 
-            audioProcessor.requestLlmGeneratePattern(naturalPrompt, bars, stepsPerBar, defaultVel, channel);
+            // Read seed from UI (fallback if empty)
+            int seedToUse = seedEditor.getText().getIntValue();
+
+            // if user typed -1 or left it blank, pick a random seed
+            if (seedEditor.getText().isEmpty() || seedToUse == -1)
+            {
+                // JUCE has Random::getSystemRandom()
+                seedToUse = juce::Random::getSystemRandom().nextInt(); // 32-bit signed
+                if (seedToUse < 0)
+                    seedToUse = -seedToUse; // keep it non-negative for simplicity
+                if (seedToUse == 0)
+                    seedToUse = 1;          // avoid 0 just in case
+            }
+
+            // send request with seedToUse
+            audioProcessor.requestLlmGeneratePattern(
+                naturalPrompt,
+                bars,
+                stepsPerBar,
+                defaultVel,
+                channel,
+                seedToUse);
 
             logEditor.moveCaretToEnd();
-            logEditor.insertTextAtCaret("[UI] Generate pattern requested...\n");
+            logEditor.insertTextAtCaret("[UI] Generate pattern requested with seed "
+                + juce::String(seedToUse) + "\n");
         };
+
     // --- log editor setup ---
     addAndMakeVisible(logEditor);
     logEditor.setMultiLine(true);
@@ -76,11 +97,7 @@ LLMidiAudioProcessorEditor::LLMidiAudioProcessorEditor(LLMidiAudioProcessor& p)
     logEditor.setScrollbarsShown(true);
     logEditor.setCaretVisible(false);
     logEditor.setPopupMenuEnabled(true); // let user right-click/copy too
-#if JUCE_MAJOR_VERSION >= 8
     logEditor.setFont(juce::FontOptions(14.0f));
-#else
-    logEditor.setFont(juce::Font(14.0f));
-#endif
     logEditor.setColour(juce::TextEditor::backgroundColourId, juce::Colours::black);
     logEditor.setColour(juce::TextEditor::textColourId, juce::Colours::white);
     logEditor.setColour(juce::TextEditor::outlineColourId, juce::Colours::darkgrey);
@@ -94,6 +111,20 @@ LLMidiAudioProcessorEditor::LLMidiAudioProcessorEditor(LLMidiAudioProcessor& p)
             << "No model loaded yet.\n\n";
         logEditor.setText(intro, juce::dontSendNotification);
     }
+    // --- seed UI ---
+    addAndMakeVisible(seedLabel);
+    seedLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+    seedLabel.setFont(juce::FontOptions(14.0f));
+
+    addAndMakeVisible(seedEditor);
+    seedEditor.setMultiLine(false);
+    seedEditor.setInputRestrictions(16, "0123456789"); // unsigned int for now
+    seedEditor.setText("-1", juce::dontSendNotification); // default
+    seedEditor.setColour(juce::TextEditor::backgroundColourId, juce::Colours::black);
+    seedEditor.setColour(juce::TextEditor::textColourId, juce::Colours::white);
+    seedEditor.setColour(juce::TextEditor::outlineColourId, juce::Colours::darkgrey);
+    seedEditor.setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::yellow.withAlpha(0.4f));
+    seedEditor.setFont(juce::FontOptions(14.0f));
 
     // poll the processor / background thread ~10 Hz
     startTimerHz(10);
@@ -124,23 +155,31 @@ void LLMidiAudioProcessorEditor::resized()
 {
     auto r = getLocalBounds().reduced(10);
 
-    // header already painted in paint(), so start layout below it
-    r.removeFromTop(30); // spacing under title
+    // leave space for title
+    r.removeFromTop(30);
 
+    // first row: buttons
     auto buttonRow = r.removeFromTop(30);
+    auto eachW = buttonRow.getWidth() / 4;
 
-    // lay out buttons horizontally:
-    // [Load Model...] [Run Smoke Test] [Copy Log]
-    auto b = buttonRow;
-    auto eachW = b.getWidth() / 4;
+    loadButton.setBounds(buttonRow.removeFromLeft(eachW).reduced(2));
+    smokeButton.setBounds(buttonRow.removeFromLeft(eachW).reduced(2));
+    copyButton.setBounds(buttonRow.removeFromLeft(eachW).reduced(2));
+    genButton.setBounds(buttonRow.removeFromLeft(eachW).reduced(2));
 
-    loadButton.setBounds(b.removeFromLeft(eachW).reduced(2));
-    smokeButton.setBounds(b.removeFromLeft(eachW).reduced(2));
-    copyButton.setBounds(b.removeFromLeft(eachW).reduced(2));
-    genButton.setBounds(b.removeFromLeft(eachW).reduced(2));
+    r.removeFromTop(6);
+
+    // second row: seed label + editor (fixed width)
+    auto seedRow = r.removeFromTop(24);
+    auto labelW = 40;
+    auto editW = 80;
+
+    seedLabel.setBounds(seedRow.removeFromLeft(labelW));
+    seedEditor.setBounds(seedRow.removeFromLeft(editW));
+
     r.removeFromTop(10);
 
-    // remaining area = log editor
+    // remaining space: log
     logEditor.setBounds(r);
 }
 
