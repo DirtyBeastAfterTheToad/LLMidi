@@ -212,37 +212,36 @@ public:
                     // Core rules: *array-of-arrays only*, no objects/keys, strict step set
                     std::ostringstream rules;
                     rules
-                        << "You are a step-based MIDI pattern generator.\n"
-                        << "\n"
-                        << "OUTPUT REQUIREMENTS:\n"
-                        << "- Output ONLY a JSON array of exactly " << genBars << " bars.\n"
-                        << "- The top-level array MUST have length " << genBars << ".\n"
-                        << "- Each bar MUST be a JSON array of exactly " << genSteps << " steps.\n"
-                        << "- So each bar must have length " << genSteps << ".\n"
-                        << "\n"
-                        << "EACH STEP MUST BE ONE OF:\n"
-                        << "  \".\"                     = rest / silence\n"
-                        << "  \"-\"                     = sustain/hold the previous note or chord\n"
-                        << "  \"NOTE\"                  = e.g. \"A#3\" or \"A#3-72\" (velocity 1..127)\n"
-                        << "  [\"NOTE\", \"NOTE\", ...]  = chord. Each NOTE may include -velocity.\n"
-                        << "\n"
-                        << "NOTE FORMAT IS STRICT:\n"
-                        << "- Legal single note: \"A#3\" (pitch + octave)\n"
-                        << "- Or \"A#3-72\" (same, plus velocity 1..127 after a dash)\n"
-                        << "- Chord example: [\"A#3\",\"D#4\",\"F4-100\"]\n"
-                        << "- ILLEGAL: \"B-3\" (dash before octave is NOT allowed)\n"
-                        << "- ILLEGAL: \"E-4\" (not allowed)\n"
-                        << "- ILLEGAL: objects like {\"note\": \"C4\"}\n"
-                        << "\n"
-                        << "STYLE HINTS:\n"
-                        << "- Use \".\" (rest) to leave space; not every step should trigger.\n"
-                        << "- Long notes = write a NOTE once, then use \"-\" in the following steps to keep it ringing.\n"
-                        << "  Example bar (4 steps): [\"E3\", \"-\", \"-\", \".\"] means E3 rings, then silence.\n"
-                        << "- You may mix low single notes and higher chords.\n"
-                        << "\n"
-                        << "DO NOT ADD ANY TEXT OUTSIDE THE JSON.\n"
-                        << "- No explanations, no comments, no code fences, no extra sentences.\n"
-                        << "- After the final ']' of the top-level array, STOP IMMEDIATELY.\n"
+                        << "You are a step-based MIDI pattern generator.\n" 
+                        << "\n" 
+                        << "OUTPUT REQUIREMENTS:\n" 
+                        << "- Output ONLY a JSON array of exactly " << genBars << " bars.\n" 
+                        << "- The top-level array MUST have length " << genBars << ".\n" 
+                        << "- Each bar MUST be a JSON array of exactly " << genSteps << " steps.\n" 
+                        << "- So each bar must have length " << genSteps << ".\n" 
+                        << "\n" 
+                        << "EACH STEP MUST BE ONE OF:\n" << " \".\" = rest / silence\n" 
+                        << " \"-\" = sustain/hold the previous note or chord\n" 
+                        " \"NOTE\" = e.g. \"A#3\" or \"A#3-72\" (velocity 1..127)\n" 
+                        << " [\"NOTE\", \"NOTE\", ...] = chord. Each NOTE may include -velocity.\n" 
+                        << "\n" 
+                        << "NOTE FORMAT IS STRICT:\n" 
+                        << "- Legal single note: \"A#3\" (pitch + octave)\n" 
+                        << "- Or \"A#3-72\" (same, plus velocity 1..127 after a dash)\n" 
+                        << "- Chord example: [\"A#3\",\"D#4\",\"F4-100\"]\n" 
+                        << "- ILLEGAL: \"B-3\" (dash before octave is NOT allowed)\n" 
+                        << "- ILLEGAL: \"E-4\" (not allowed)\n" 
+                        << "- ILLEGAL: objects like {\"note\": \"C4\"}\n" 
+                        << "- Notes never start with '-'. Example: \"E4-64\" is valid, but \"-E4-64\" is invalid.\n" 
+                        << "- Never merge symbols. Each step must be a single symbol: '.', '-', or a note. No combos like '-.' allowed.\n" 
+                        << "\n" 
+                        << "STYLE HINTS:\n" 
+                        << "- Use rests \".\" to leave space; not every step should trigger.\n" 
+                        << "- You may hold notes/chords across multiple steps using \"-\" instead of repeating them.\n" 
+                        << "- You may mix bass notes and higher notes or chords.\n" 
+                        << "\n" << "DO NOT ADD ANY TEXT OUTSIDE THE JSON.\n" 
+                        << "- No explanations, no comments, no code fences, no extra sentences.\n" 
+                        << "- After the final ']' of the top-level array, STOP IMMEDIATELY.\n" 
                         << "- The last character in your response MUST be ']'.\n";
 
                     // ---- Detect model family for prompt layout
@@ -316,7 +315,14 @@ public:
                         std::string trimmed = raw;
                         while (!trimmed.empty() && std::isspace((unsigned char)trimmed.front())) trimmed.erase(trimmed.begin());
                         while (!trimmed.empty() && std::isspace((unsigned char)trimmed.back()))  trimmed.pop_back();
-
+                        auto pos = trimmed.rfind(']');
+                        if (pos != std::string::npos) 
+                            trimmed = trimmed.substr(0, pos + 1);
+                        juce::String s = trimmed.c_str();
+                        s = s.replace("\"-.\"", "\"-\"");
+                        s = s.replace("\".-\"", "\".\"");
+                        s = s.replace("\"_\"", "\"-\"");
+                        trimmed = s.toStdString();
                         // ---- Parse JSON -> ParsedPhrase
                         ParsedPhrase phrase;
                         std::string perr;
