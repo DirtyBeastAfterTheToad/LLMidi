@@ -1,6 +1,7 @@
 #include "BackgroundGenerator.h"
 #include "SequenceValidator.h"
-
+#include <regex>
+#include <functional>
 // ---------- Local helpers (file-scope) ----------
 namespace
 {
@@ -68,6 +69,145 @@ namespace
 
         return seq;
     }
+    static void coercePhraseShape(ParsedPhrase& p, int wantBars, int wantSteps, std::function<void(const juce::String&)> log)
+    {
+        auto makeRest = []() { return StepEvent{ StepEvent::Kind::Rest, {} }; };
+
+        // Fix steps per bar
+        for (auto& bar : p.bars)
+        {
+            if ((int)bar.size() > wantSteps)
+            {
+                bar.resize((size_t)wantSteps);
+                if (log) log("Coerce: trimmed extra steps to match requested stepsPerBar.");
+            }
+            else while ((int)bar.size() < wantSteps)
+            {
+                bar.push_back(makeRest());
+            }
+        }
+
+        // Fix bar count
+        if ((int)p.bars.size() > wantBars)
+        {
+            p.bars.resize((size_t)wantBars);
+            if (log) log("Coerce: trimmed extra bars to match requested bar count.");
+        }
+        else if ((int)p.bars.size() < wantBars)
+        {
+            std::vector<StepEvent> filler;
+            if (!p.bars.empty()) filler = p.bars.back();
+            else                 filler.assign((size_t)wantSteps, makeRest());
+
+            while ((int)p.bars.size() < wantBars)
+                p.bars.push_back(filler);
+
+            if (log) log("Coerce: padded missing bars to match requested bar count.");
+        }
+    }
+    // Strict JSON array of bars; no whitespace allowed.
+    static std::string makeJsonPatternGrammar(int bars, int steps) {
+        std::ostringstream g;
+        const char* nl = "\n";
+
+        g << "root  ::= bars" << nl;
+
+        // bars: "[" bar ("," bar)* "]" — exactly `bars` bars
+        g << "bars  ::= \"[\" bar";
+        for (int i = 1; i < bars; ++i) g << ",bar";
+        g << "]" << nl;
+
+        // bar: "[" step ("," step)* "]" — exactly `steps` steps
+        g << "bar   ::= \"[\" step";
+        for (int i = 1; i < steps; ++i) g << ",step";
+        g << "]" << nl;
+
+        // step kinds
+        g << "step  ::= rest | sustain | note | chord" << nl;
+
+        // JSON strings "." and "-"
+        g << "rest     ::= \"\\\".\\\"\"" << nl;
+        g << "sustain  ::= \"\\\"-\\\"\"" << nl;
+
+        // chord: "[" note ("," note)* "]" — allow 1+ notes (more robust)
+        g << "chord    ::= \"[\" note (\",\" note)* \"]\"" << nl;  // <<< FIXED HERE
+
+        // note: "pitch" "octave" optional "-velocity"
+        g << "note     ::= \"\\\"\" pitch octave velopt \"\\\"\"" << nl;
+
+        // epsilon is the empty alternative per GBNF docs
+        g << "velopt   ::= | \"-\" digit digit? digit?" << nl;
+
+        g << "pitch    ::= "
+            "\"C\"|\"C#\"|\"Db\"|\"D\"|\"D#\"|\"Eb\"|\"E\"|\"F\"|\"F#\"|\"Gb\"|"
+            "\"G\"|\"G#\"|\"Ab\"|\"A\"|\"A#\"|\"Bb\"|\"B\"" << nl;
+
+        // optional leading minus, then 1+ digits
+        g << "octave   ::= \"-\"? digit+" << nl;
+
+        g << "digit    ::= \"0\"|\"1\"|\"2\"|\"3\"|\"4\"|\"5\"|\"6\"|\"7\"|\"8\"|\"9\"" << nl;
+
+        return g.str();
+    }
+    // Remove leading/trailing Markdown code fences and language tags, if present.
+// Returns true if a fence was stripped.
+    static bool stripMarkdownFence(std::string& s) {
+        size_t open = s.find("```");
+        if (open == std::string::npos) return false;
+
+        size_t close = s.rfind("```");
+        if (close == std::string::npos || close <= open) return false;
+
+        // Look for the first '[' after the opening fence
+        size_t probe = open + 3; // after ```
+        size_t bracket = s.find('[', probe);
+        if (bracket != std::string::npos && bracket < close) {
+            // Prefer balanced array extraction between bracket and close fence
+            // but if we can't balance, at least slice raw region.
+            // Try to find the last ']' before the close fence.
+            size_t lastBracket = s.rfind(']', close - 1);
+            if (lastBracket != std::string::npos && lastBracket > bracket) {
+                s = s.substr(bracket, lastBracket - bracket + 1);
+                return true;
+            }
+        }
+
+        // Fallback: assume a newline-delimited fence; take content between fences
+        size_t contentStart = open + 3;
+        // Skip optional language token until newline if present
+        size_t nl = s.find('\n', contentStart);
+        if (nl != std::string::npos && nl + 1 < close) {
+            s = s.substr(nl + 1, close - (nl + 1));
+            return true;
+        }
+
+        return false;
+    }
+
+    // Remove common special tokens the model might append.
+    static void stripTrailingSpecialTokens(std::string& s) {
+        static const char* toks[] = {
+            "<|end|>", "<|endoftext|>", "<|im_end|>", "</s>", "[/INST]"
+        };
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            // Trim whitespace at end
+            while (!s.empty() && (unsigned char)s.back() <= ' ') s.pop_back();
+            for (auto* t : toks) {
+                size_t L = std::strlen(t);
+                if (s.size() >= L && s.compare(s.size() - L, L, t) == 0) {
+                    s.erase(s.size() - L);
+                    changed = true;
+                    break;
+                }
+            }
+        }
+    }
+
+
+
+
 } // namespace
 
 // ---------- BackgroundGenerator ----------
@@ -264,27 +404,36 @@ void BackgroundGenerator::runPatternGeneration(const GenRequest& req)
     const std::string prompt = buildPrompt(isPhi, user, req.bars, req.steps);
 
     LlamaInferParams ip;
-    ip.temperature = 0.30f;
+    ip.temperature = 0.20f;
     ip.top_p = 0.90f;
     ip.top_k = 0;
     ip.repeat_penalty = 1.05f;
-    ip.max_tokens = 512;
+    ip.max_tokens = 256;
     ip.seed = req.seed;
     ip.grammar.clear();
-    ip.stop = isPhi ? std::vector<std::string>{ "<|end|>" }
-    : std::vector<std::string>{ "</s>" };
+    ip.grammar = makeJsonPatternGrammar(req.bars, req.steps);
+    ip.stop.clear();
+    ip.stop.push_back("```");
+    ip.stop.push_back("<|end|>");
+    ip.stop.push_back("<|endoftext|>");
+    ip.stop.push_back("<|im_end|>");
+    ip.stop.push_back("</s>");
+    ip.stop.push_back("[/INST]");
+    appendLog("Grammar size: " + juce::String((int)ip.grammar.size()));
 
     double tps = 0.0;
-
+    std::string genErr;
     const std::string raw = runner->generate(
         prompt,
         ip,
         &tps,
-        /*errorOut*/ nullptr,
+        /*errorOut*/ &genErr,
         /*onLog*/ [this](const std::string& line)
         {
             this->appendLog(juce::String(line));
         });
+    if (!genErr.empty())
+        appendLog("LLM error: " + juce::String(genErr));
 
     if (raw.empty())
     {
@@ -301,7 +450,9 @@ void BackgroundGenerator::runPatternGeneration(const GenRequest& req)
         return;
     }
 
-    const auto phrase = *phraseOpt;
+    ParsedPhrase phrase = *phraseOpt;
+    coercePhraseShape(phrase, req.bars, req.steps,
+        [this](const juce::String& m) { this->appendLog(m); });
     const auto summary = summarize(phrase);
 
     {
@@ -382,60 +533,28 @@ std::string BackgroundGenerator::buildPrompt(bool isPhi,
     int bars,
     int steps) const
 {
-    // Compact, token-friendly rules with your examples (no escapes in the prompt content)
     std::ostringstream rules;
     rules
         << "You are a step-based MIDI pattern generator.\n"
-        << "\n"
-        << "RULES:\n"
-        << "- Output ONLY a JSON array of exactly " << bars << " bars.\n"
-        << "- Each bar is a list of exactly " << steps << " steps.\n"
-        << "- Each step can be:\n"
-        << "  .   = rest\n"
-        << "  -   = sustain previous note or chord\n"
-        << "  NOTE = e.g. A#3 or A#3-80 (velocity 1–127)\n"
-        << "  [NOTE, ...] = chord (each note may include -velocity)\n"
-        << "\n"
-        << "NOTES:\n"
-        << "- Use C, C#, D, D#, E, F, F#, G, G#, A, A#, B with octaves.\n"
-        << "- Flats (b) allowed (e.g. Bb3).\n"
-        << "- Do NOT use a dash before octave (B-3, E-4 are invalid).\n"
-        << "- Do NOT start notes with '-' (-E4-64 invalid).\n"
-        << "- No combos like '-.' or '--'.\n"
-        << "- Bars cannot start with a sustain '-'.\n"
-        << "\n"
-        << "STYLE:\n"
-        << "- Minor or trap groove.\n"
-        << "- Mix short notes, chords, sustains, and rests.\n"
-        << "- Use '-' to hold notes, '.' for silence.\n"
-        << "\n"
-        << "EXAMPLES:\n"
-        << "[[\"C4\",\"-\",\"E4\",\"-\"],[\"G4\",\"-\",\"C5\",\"-\"]]\n"
-        << "[[\"A#3\",\"-\",\"D#4\",\"-\"],[\"F4\",\"-\",\".\",\"G#3\"],[\"C#4\",\"-\",\"D#4\",\"-\"],[\"G#3\",\".\",\"A#3\",\"-\"]]\n"
-        << "[[[\"C3\",\"E3\",\"G3\"],\"-\",\"-\",\"-\"],[[\"F3\",\"A3\",\"C4\"],\"-\",\"-\",\"-\"],[[\"G3\",\"B3\",\"D4\"],\"-\",\"-\",\"-\"],[[\"C3\",\"E3\",\"G3\"],\"-\",\"-\",\"-\"]]\n"
-        << "[[[\"A#3\",\"D#4\",\"F4\"],\"-\",\"-\",\"-\",\"-\",\"-\",\"-\",\"-\"],[\"A#3\",\"-\",\"C#4\",\".\",\"D#4\",\"-\",\"F4\",\".\"],[[\"G#3\",\"C#4\",\"D#4\"],\"-\",\"-\",\"-\",[\"F3\",\"A#3\",\"C#4\"],\"-\",\"-\",\"-\"],[\"G#3\",\"-\",\"-\",\".\",\"A#3\",\"C#4\",\"-\",\"D#4\"],[[\"B2\",\"F#3\",\"D#4\"],\"-\",\"A#3\",\"C#4\",\"-\",\"D#4\",\"-\",\".\"],[\".\",\".\",\"A#2\",\"-\",\"-\",\".\",\"G#2\",\"-\"],[\"A#3\",\"C#4\",\"D#4\",\"F4\",\"G#4\",\"F4\",\"D#4\",\"C#4\"],[[\"A#3\",\"D#4\",\"F4\",\"A#4\"],\"-\",\"-\",\"-\",\"-\",\"-\",\"-\",\"-\"]]\n"
-        << "\n"
-        << "Output ONLY the JSON array. No text, no comments, no quotes around it.\n"
-        << "After the final ']', stop.\n";
+        << "Return ONLY a JSON array of exactly " << bars << " bars,\n"
+        << "each bar with exactly " << steps << " steps.\n"
+        << "Step values:\n"
+        << "  \".\"  = rest\n"
+        << "  \"-\"  = sustain previous note/chord\n"
+        << "  \"A#3\" or \"A#3-80\" = note (velocity 1..127)\n"
+        << "  [\"A#3\",\"C4-90\", ...] = chord (2+ notes)\n"
+        << "No text before '[' and nothing after the final ']'.\n"
+        << "Style: " << user << "\n";
+
     std::ostringstream prompt;
     if (isPhi)
     {
-        // Phi-3 chat format
-        prompt << "<|user|>\n"
-            << rules.str()
-            << "\nTask: " << user << "\n"
-            << "Return ONLY the JSON.\n"
-            << "<|end|>\n"
-            << "<|assistant|>";
+        prompt << "<|user|>\n" << rules.str()
+            << "<|end|>\n<|assistant|>";
     }
     else
     {
-        // Mistral Instruct v0.3 format
-        prompt << "<s>[INST] <<SYS>>"
-            << rules.str()
-            << "<</SYS>> "
-            << "Task: " << user << " "
-            << "Return ONLY the JSON. [/INST]";
+        prompt << "<s>[INST] <<SYS>>" << rules.str() << "<</SYS>> [/INST]";
     }
 
     return prompt.str();
@@ -444,70 +563,105 @@ std::string BackgroundGenerator::buildPrompt(bool isPhi,
 std::optional<ParsedPhrase> BackgroundGenerator::sanitizeAndParse(const std::string& raw,
     int defaultVelocity)
 {
+    std::string text = raw;
+
+    // Strip markdown fences & trailing special tokens (```json ... ```, <|end|>, etc.)
+    (void)stripMarkdownFence(text);
+    stripTrailingSpecialTokens(text);
+
+    // Trim
+    while (!text.empty() && std::isspace((unsigned char)text.front())) text.erase(text.begin());
+    while (!text.empty() && std::isspace((unsigned char)text.back()))  text.pop_back();
+
+    // Keep up to last ']'
+    if (auto pos = text.rfind(']'); pos != std::string::npos)
+        text = text.substr(0, pos + 1);
+
+    // Minor typo sanitation
+    {
+        juce::String s = text.c_str();
+        s = s.replace("\"-.\"", "\"-\"");
+        s = s.replace("\".-\"", "\".\"");
+        s = s.replace("\"_\"", "\"-\"");
+        text = s.toStdString();
+    }
+
+    // Extract a balanced outer JSON array
     auto extractBalancedArray = [](const std::string& s) -> std::optional<std::string>
         {
             size_t start = s.find('[');
             if (start == std::string::npos) return std::nullopt;
 
             int depth = 0;
-            for (size_t i = start; i < s.size(); ++i)
-            {
-                const char c = s[i];
+            for (size_t i = start; i < s.size(); ++i) {
+                char c = s[i];
                 if (c == '[') ++depth;
-                else if (c == ']')
-                {
+                else if (c == ']') {
                     --depth;
-                    if (depth == 0)
-                        return s.substr(start, i - start + 1);
+                    if (depth == 0) return s.substr(start, i - start + 1);
                 }
             }
             return std::nullopt;
         };
+    if (auto balanced = extractBalancedArray(text))
+        text = *balanced;
 
-    // Trim
-    std::string trimmed = raw;
-    while (!trimmed.empty() && std::isspace((unsigned char)trimmed.front())) trimmed.erase(trimmed.begin());
-    while (!trimmed.empty() && std::isspace((unsigned char)trimmed.back()))  trimmed.pop_back();
+    // Heuristic: if it already *looks* like JSON (has many quotes), skip the
+    // "quote bare note tokens" fixer to avoid corrupting valid JSON.
+    bool looksQuotedJson = (text.find('\"') != std::string::npos);
 
-    // Keep up to last ']'
-    if (auto pos = trimmed.rfind(']'); pos != std::string::npos)
-        trimmed = trimmed.substr(0, pos + 1);
+    if (!looksQuotedJson) {
+        // Only attempt to quote bare note tokens if it's likely *not* already JSON
+        std::string out;
+        out.reserve(text.size());
+        bool inBracket = false;
+        std::string token;
 
-    // Quick typo sanitation
-    {
-        juce::String s = trimmed.c_str();
-        s = s.replace("\"-.\"", "\"-\"");
-        s = s.replace("\".-\"", "\".\"");
-        s = s.replace("\"_\"", "\"-\"");
-        trimmed = s.toStdString();
+        auto flushToken = [&](bool forceQuote) {
+            if (token.empty()) return;
+            static const std::regex noteRe(R"(^[A-G][#b]?-?\d+(?:-\d{1,3})?$)");
+            if (std::regex_match(token, noteRe)) {
+                out += forceQuote ? ("\"" + token + "\"") : token;
+            }
+            else {
+                out += token;
+            }
+            token.clear();
+            };
+
+        for (size_t i = 0; i < text.size(); ++i) {
+            char c = text[i];
+            if (c == '[') { inBracket = true; out += c; }
+            else if (c == ']') { flushToken(inBracket); inBracket = false; out += c; }
+            else if (inBracket && (c == ',' || std::isspace((unsigned char)c))) {
+                flushToken(true);
+                out += c;
+            }
+            else {
+                token.push_back(c);
+            }
+        }
+        flushToken(inBracket);
+        text = out;
     }
-
-    // Prefer balanced outer array if available
-    if (auto balanced = extractBalancedArray(trimmed))
-        trimmed = *balanced;
 
     ParsedPhrase phrase;
     std::string perr;
-
-    if (!parseJsonBars(trimmed, defaultVelocity, perr, phrase))
-    {
+    if (!parseJsonBars(text, defaultVelocity, perr, phrase)) {
         appendLog("Parse error: " + juce::String(perr));
 
-        // Try slice first '[' .. last ']'
-        auto l = trimmed.find('[');
-        auto r = trimmed.rfind(']');
-        if (l != std::string::npos && r != std::string::npos && r > l)
-        {
-            std::string salvage = trimmed.substr(l, r - l + 1);
+        // salvage by outer slice again (first '[' .. last ']')
+        auto l = text.find('[');
+        auto r = text.rfind(']');
+        if (l != std::string::npos && r != std::string::npos && r > l) {
+            std::string salvage = text.substr(l, r - l + 1);
             perr.clear();
             ParsedPhrase salvagePhrase;
-            if (parseJsonBars(salvage, defaultVelocity, perr, salvagePhrase))
-            {
+            if (parseJsonBars(salvage, defaultVelocity, perr, salvagePhrase)) {
                 appendLog("Recovered JSON by slicing outer brackets.");
                 phrase = std::move(salvagePhrase);
             }
-            else
-            {
+            else {
                 appendLog("Salvage also failed: " + juce::String(perr));
             }
         }
@@ -518,6 +672,9 @@ std::optional<ParsedPhrase> BackgroundGenerator::sanitizeAndParse(const std::str
 
     return phrase;
 }
+
+
+
 
 void BackgroundGenerator::appendLog(const juce::String& line)
 {
