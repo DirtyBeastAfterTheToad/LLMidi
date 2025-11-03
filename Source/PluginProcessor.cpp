@@ -1,7 +1,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "LlamaRunner.h"
-
+#include <unordered_set>
 namespace
 {
 	double beatsPerBar(const juce::AudioPlayHead::CurrentPositionInfo& pos)
@@ -84,7 +84,27 @@ void LLMidiAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
 {
 	juce::ScopedNoDenormals noDenormals;
 	buffer.clear();
-
+	struct EmittedKey {
+		uint8_t type;
+		uint8_t ch;
+		uint8_t pitch;
+		int     sample;
+		bool operator==(const EmittedKey& o) const {
+			return type == o.type && ch == o.ch && pitch == o.pitch && sample == o.sample;
+		}
+	};
+	struct EmittedKeyHash {
+		size_t operator()(const EmittedKey& k) const noexcept {
+			// pack into 64-bit: t(1) | ch(7) | pitch(8) | sample(48)
+			uint64_t v = 0;
+			v |= (uint64_t)(k.type & 0x1);
+			v |= (uint64_t)(k.ch & 0x7F) << 1;
+			v |= (uint64_t)(k.pitch & 0xFF) << 8;
+			v |= (uint64_t)(k.sample & 0xFFFFFFFFFFFFull) << 16;
+			return std::hash<uint64_t>{}(v);
+		}
+	};
+	std::unordered_set<EmittedKey, EmittedKeyHash> emittedThisBlock;
 	juce::AudioPlayHead::CurrentPositionInfo pos;
 	const bool havePos = getHostPosition(pos);
 
@@ -114,7 +134,21 @@ void LLMidiAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
 		didCatchUp = false;
 		lastTimeline = timeline;
 	}
+	auto safeAddOn = [&](int ch, int pitch, int vel, int sampleOffset) {
+		EmittedKey key{ 0, (uint8_t)ch, (uint8_t)pitch, sampleOffset };
+		if (emittedThisBlock.insert(key).second) {
+			juce::MidiMessage m = juce::MidiMessage::noteOn(ch + 1, pitch, (juce::uint8)juce::jlimit(1, 127, vel));
+			midi.addEvent(m, sampleOffset);
+		}
+		};
 
+	auto safeAddOff = [&](int ch, int pitch, int sampleOffset) {
+		EmittedKey key{ 1, (uint8_t)ch, (uint8_t)pitch, sampleOffset };
+		if (emittedThisBlock.insert(key).second) {
+			juce::MidiMessage m = juce::MidiMessage::noteOff(ch + 1, pitch);
+			midi.addEvent(m, sampleOffset);
+		}
+		};
 	const double bpm = pos.bpm > 0.0 ? pos.bpm : (double)sequence.bpm;
 	const double beatsPerSecond = bpm / 60.0;
 	const double secondsPerBlock = (double)buffer.getNumSamples() / sr;
@@ -137,18 +171,14 @@ void LLMidiAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
 			0, buffer.getNumSamples() - 1,
 			(int)std::floor(secondsFromStart * sr + 0.5));
 
-		if (e.type == 0)
-		{
+		if (e.type == 0) {
 			Key k{ e.channel, e.pitch };
-			if (activeNotes.find(k) != activeNotes.end())
-				continue;
-
-			addNoteOn(midi, e.channel, e.pitch, e.velocity, sampleOffset);
+			if (activeNotes.find(k) != activeNotes.end()) continue;
+			safeAddOn(e.channel, e.pitch, e.velocity, sampleOffset);
 			activeNotes.insert(k);
 		}
-		else
-		{
-			addNoteOff(midi, e.channel, e.pitch, sampleOffset);
+		else {
+			safeAddOff(e.channel, e.pitch, sampleOffset);
 			Key k{ e.channel, e.pitch };
 			activeNotes.erase(k);
 		}
@@ -164,7 +194,7 @@ juce::AudioProcessorEditor* LLMidiAudioProcessor::createEditor()
 void LLMidiAudioProcessor::requestLoadModelFromFile(const juce::File& file)
 {
 	LlamaContextParams p;
-	p.n_ctx = 1024;
+	p.n_ctx = 2048;
 	p.n_batch = 2048;
 	p.seed = 12345;
 
@@ -213,6 +243,7 @@ void LLMidiAudioProcessor::performCatchUpIfNeeded(
 	juce::MidiBuffer& midi,
 	double /*beatsPerSecond*/)
 {
+
 	if (didCatchUp || !timeline) return;
 
 	const double curPPQ = pos.ppqPosition;

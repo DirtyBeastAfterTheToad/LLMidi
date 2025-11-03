@@ -66,7 +66,8 @@ void MidiScheduler::buildFromSequence(const Sequence& seq,
 
 			const int totalSteps = 1 + sustainCount;
 			const double stepEndPPQ = stepStartPPQ + beatsPerStep * (double)totalSteps;
-
+			if (stepEndPPQ <= stepStartPPQ)
+				continue;
 			if (step.isNote() || step.isChord())
 			{
 				for (const auto& n : step.notes)
@@ -82,8 +83,10 @@ void MidiScheduler::buildFromSequence(const Sequence& seq,
 	std::sort(events.begin(), events.end(),
 		[](const ScheduledMidi& a, const ScheduledMidi& b)
 		{
-			if (a.ppq != b.ppq) return a.ppq < b.ppq;
-			return a.type < b.type; // NoteOn before NoteOff at same ppq
+			if (a.ppq < b.ppq) return true;
+			if (a.ppq > b.ppq) return false;
+			// same timestamp: put NoteOff first
+			return a.type > b.type; // 1 (off) before 0 (on)
 		});
 }
 

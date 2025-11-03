@@ -284,8 +284,12 @@ std::string LlamaRunner::generate(const std::string& prompt,
 	llama_sampler_chain_add(chain, eosBlocker);
 	const int eosBlockerIndex = llama_sampler_chain_n(chain) - 1;
 
-	// seed penalties with prompt
-	for (auto t : prompt_tokens) llama_sampler_accept(chain, t);
+	const bool hasGrammar = !ip.grammar.empty();
+	if (!hasGrammar) {
+		for (auto t : prompt_tokens) {
+			llama_sampler_accept(chain, t);
+		}
+	}
 
 	// 4) Generation 
 	std::vector<llama_token> out_tokens;

@@ -42,24 +42,29 @@ namespace {
 			StepEvent chord;
 			chord.kind = StepEvent::Kind::Notes;
 
-			if (arr->isEmpty())
-			{
-				chord.kind = StepEvent::Kind::Rest;
-				return chord;
-			}
+			if (arr->isEmpty()) { chord.kind = StepEvent::Kind::Rest; return chord; }
 
 			for (const auto& el : *arr)
 			{
 				if (!el.isString()) { err = "Chord element is not a string"; return {}; }
+				const juce::String tok = el.toString().trim();
+
+				// NEW: skip illegal tokens inside chord arrays
+				if (tok == "-" || tok == ".") continue;
 
 				try {
-					auto [midi, vel] = parseNoteToken(el.toString().trim().toStdString(), defaultVel);
+					auto [midi, vel] = parseNoteToken(tok.toStdString(), defaultVel);
 					chord.notes.push_back({ midi, vel });
 				}
 				catch (const std::exception& e) {
 					err = e.what();
 					return {};
 				}
+			}
+
+			if (chord.notes.empty()) {
+				// If everything was skipped, treat as rest
+				chord.kind = StepEvent::Kind::Rest;
 			}
 			return chord;
 		}

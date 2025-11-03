@@ -93,7 +93,7 @@ private:
     GenRequest pendingGenReq{};
 
     Sequence latestGeneratedSeq;
-    std::atomic<bool> haveLatestGeneratedSeq{ false };
+    mutable std::atomic<bool> haveLatestGeneratedSeq{ false };
     juce::CriticalSection latestSeqLock;
 
     juce::CriticalSection logLock;
