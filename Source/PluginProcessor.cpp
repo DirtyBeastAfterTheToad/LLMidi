@@ -2,352 +2,260 @@
 #include "PluginEditor.h"
 #include "LlamaRunner.h"
 
+namespace
+{
+	double beatsPerBar(const juce::AudioPlayHead::CurrentPositionInfo& pos)
+	{
+		if (pos.timeSigNumerator > 0 && pos.timeSigDenominator > 0)
+			return pos.timeSigNumerator * (4.0 / pos.timeSigDenominator);
+		return 4.0;
+	}
+
+	void addNoteOn(juce::MidiBuffer& midi, int channel, int pitch, int velocity, int sampleOffset)
+	{
+		juce::MidiMessage m = juce::MidiMessage::noteOn(
+			channel + 1, pitch, (juce::uint8)juce::jlimit(1, 127, velocity));
+		midi.addEvent(m, sampleOffset);
+	}
+
+	void addNoteOff(juce::MidiBuffer& midi, int channel, int pitch, int sampleOffset)
+	{
+		juce::MidiMessage m = juce::MidiMessage::noteOff(channel + 1, pitch);
+		midi.addEvent(m, sampleOffset);
+	}
+}
+
 LLMidiAudioProcessor::LLMidiAudioProcessor()
-#ifndef JucePlugin_PreferredChannelConfigurations
-    : AudioProcessor(BusesProperties()
-#if ! JucePlugin_IsMidiEffect
-#if ! JucePlugin_IsSynth
-        .withInput("Input", juce::AudioChannelSet::stereo(), true)
-#endif
-        .withOutput("Output", juce::AudioChannelSet::stereo(), true)
-#endif
-    )
-#endif
+	: AudioProcessor(juce::AudioProcessor::BusesProperties()
+		.withOutput("Output", juce::AudioChannelSet::stereo(), true))
 {
-    // Create a simple default sequence for smoke testing: 2 bars, 4 steps
-    sequence.bars = 2;
-    sequence.stepsPerBar = 4;
-    sequence.midiChannel = 0;
-    sequence.bpm = 120;
-
-    sequence.data.resize(2);
-    // Bar 1: C4 held for full bar
-    sequence.data[0].steps = {
-        Step::makeChord({ {60,100} }), // C4
-        Step::makeSustain(),
-        Step::makeSustain(),
-        Step::makeSustain()
-    };
-    // Bar 2: G3 held for full bar
-    sequence.data[1].steps = {
-        Step::makeChord({ {55,100} }), // G3
-        Step::makeSustain(),
-        Step::makeSustain(),
-        Step::makeSustain()
-    };
-}
-void LLMidiAudioProcessor::requestLoadModelFromFile(const juce::File& file)
-{
-    LlamaContextParams p;
-    p.n_ctx = 1024;
-    p.n_batch = 2048;
-    p.seed = 12345;
-
-    generator.requestLoadModel(file.getFullPathName().toStdString(), p);
-}
-juce::String LLMidiAudioProcessor::getLlmLog() const
-{
-    return generator.getLogText();
-}
-void LLMidiAudioProcessor::requestLlmSmokeTest()
-{
-    generator.requestLlmSmokeTest();
+	sequence.bars = 0;
+	sequence.stepsPerBar = 4;
+	sequence.midiChannel = 0;
+	sequence.bpm = 120;
+	sequence.data.clear();
 }
 
-bool LLMidiAudioProcessor::isModelReady() const
-{
-    return generator.isModelReady();
-}
-
-juce::String LLMidiAudioProcessor::getLlmStatus() const
-{
-    return generator.getLastLlmError();
-}
-void LLMidiAudioProcessor::requestBurnToMidi()
-{
-    // Pull the most recent generated sequence from the background thread.
-    // We already have generator.getLatestGeneratedSequence(), so reuse it.
-    Sequence seqOut;
-    if (generator.getLatestGeneratedSequence(seqOut))
-    {
-        // Store it so the host integration layer (to be written) can grab it.
-        lastBurnCandidate = seqOut;
-
-        // TODO: actual DAW write
-        // For now we'll just append to the log via background log, so user sees success.
-        // Easiest: just ask BackgroundGenerator to append a log line? We don't have a direct call,
-        // so we'll do UI-only feedback in burnButton.onClick() for now.
-    }
-    else
-    {
-        // No sequence yet. We could also stash an error flag if we want.
-    }
-}
-
-void LLMidiAudioProcessor::refreshSequenceFromGeneratorIfAvailable()
-{
-    Sequence newSeq;
-    if (generator.getLatestGeneratedSequence(newSeq))
-    {
-        const bool shapeChanged =
-            (newSeq.bars != sequence.bars) ||
-            (newSeq.stepsPerBar != sequence.stepsPerBar);
-
-        sequence = newSeq;
-
-        haveSchedule = false;   // force BackgroundGenerator to rebuild timeline at host bar
-        didCatchUp = false;   // so we emit fresh NoteOns for the new clip
-
-        if (shapeChanged)
-            activeNotes.clear();
-    }
-}
-LLMidiAudioProcessor::~LLMidiAudioProcessor() {}
+LLMidiAudioProcessor::~LLMidiAudioProcessor() = default;
 
 const juce::String LLMidiAudioProcessor::getName() const { return JucePlugin_Name; }
-
-bool LLMidiAudioProcessor::acceptsMidi() const
-{
-#if JucePlugin_WantsMidiInput
-    return true;
-#else
-    return false;
-#endif
-}
-bool LLMidiAudioProcessor::producesMidi() const
-{
-#if JucePlugin_ProducesMidiOutput
-    return true;
-#else
-    return false;
-#endif
-}
-bool LLMidiAudioProcessor::isMidiEffect() const
-{
-#if JucePlugin_IsMidiEffect
-    return true;
-#else
-    return false;
-#endif
-}
+bool   LLMidiAudioProcessor::acceptsMidi()   const { return false; }
+bool   LLMidiAudioProcessor::producesMidi()  const { return true; }
+bool   LLMidiAudioProcessor::isMidiEffect()  const { return false; }
 double LLMidiAudioProcessor::getTailLengthSeconds() const { return 0.0; }
-int LLMidiAudioProcessor::getNumPrograms() { return 1; }
-int LLMidiAudioProcessor::getCurrentProgram() { return 0; }
+
+int  LLMidiAudioProcessor::getNumPrograms() { return 1; }
+int  LLMidiAudioProcessor::getCurrentProgram() { return 0; }
 void LLMidiAudioProcessor::setCurrentProgram(int) {}
 const juce::String LLMidiAudioProcessor::getProgramName(int) { return {}; }
 void LLMidiAudioProcessor::changeProgramName(int, const juce::String&) {}
 
 void LLMidiAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
-    sr = sampleRate;
-    spb = samplesPerBlock;
-    haveSchedule = false;
-    wasPlaying = false;
+	sr = sampleRate;
+	spb = samplesPerBlock;
+	haveSchedule = false;
+	wasPlaying = false;
 }
 
 void LLMidiAudioProcessor::releaseResources() {}
 
-#ifndef JucePlugin_PreferredChannelConfigurations
 bool LLMidiAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
 {
-#if JucePlugin_IsMidiEffect
-    juce::ignoreUnused(layouts);
-    return true;
-#else
-    if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::mono()
-        && layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo())
-        return false;
-#if ! JucePlugin_IsSynth
-    if (layouts.getMainOutputChannelSet() != layouts.getMainInputChannelSet())
-        return false;
-#endif
-    return true;
-#endif
+	const auto out = layouts.getMainOutputChannelSet();
+	return out == juce::AudioChannelSet::mono() || out == juce::AudioChannelSet::stereo();
 }
-#endif
 
 bool LLMidiAudioProcessor::getHostPosition(juce::AudioPlayHead::CurrentPositionInfo& info) const
 {
-    if (auto* ph = getPlayHead())
-        return ph->getCurrentPosition(info);
-    return false;
-}
-static double computeBeatsPerBar(const juce::AudioPlayHead::CurrentPositionInfo& pos)
-{
-    if (pos.timeSigNumerator > 0 && pos.timeSigDenominator > 0)
-        return pos.timeSigNumerator * (4.0 / pos.timeSigDenominator);
-    return 4.0; // fallback
-}
-static void addNoteOn(juce::MidiBuffer& midi, int channel, int pitch, int velocity, int sampleOffset)
-{
-    juce::MidiMessage m = juce::MidiMessage::noteOn(channel + 1, pitch, (juce::uint8)juce::jlimit(1, 127, velocity));
-    midi.addEvent(m, sampleOffset);
+	if (auto* ph = getPlayHead())
+		return ph->getCurrentPosition(info);
+	return false;
 }
 
-static void addNoteOff(juce::MidiBuffer& midi, int channel, int pitch, int sampleOffset)
-{
-    juce::MidiMessage m = juce::MidiMessage::noteOff(channel + 1, pitch);
-    midi.addEvent(m, sampleOffset);
-}
 void LLMidiAudioProcessor::scheduleNowAtCurrentBar(const juce::AudioPlayHead::CurrentPositionInfo& pos)
 {
-    const double beatsPerBar = computeBeatsPerBar(pos);
-    const double barStart = pos.ppqPositionOfLastBarStart;
-    startBarPPQ = barStart;
+	startBarPPQ = pos.ppqPositionOfLastBarStart;
+	generator.requestBuild(sequence, startBarPPQ, beatsPerBar(pos));
+	haveSchedule = true;
+}
 
-    generator.requestBuild(sequence, startBarPPQ, beatsPerBar);
-    haveSchedule = true;
-}
-void LLMidiAudioProcessor::flushAllActiveNotes(juce::MidiBuffer& midi, int sampleOffset)
-{
-    for (const auto& k : activeNotes)
-        addNoteOff(midi, k.ch, k.pitch, sampleOffset);
-    activeNotes.clear();
-}
 void LLMidiAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
-    juce::ScopedNoDenormals noDenormals;
-    buffer.clear();
+	juce::ScopedNoDenormals noDenormals;
+	buffer.clear();
 
-    juce::AudioPlayHead::CurrentPositionInfo pos;
-    const bool havePos = getHostPosition(pos);
-    if (!havePos)
-    {
-        if (wasPlaying)
-        {
-            juce::MidiBuffer dummy;
-            flushAllActiveNotes(midi, 0);
-            wasPlaying = false;
-        }
-        return;
-    }
+	juce::AudioPlayHead::CurrentPositionInfo pos;
+	const bool havePos = getHostPosition(pos);
 
-    if (!pos.isPlaying)
-    {
-        if (wasPlaying)
-        {
-            flushAllActiveNotes(midi, 0);
-            wasPlaying = false;
-        }
-        return;
-    }
+	if (!havePos || !pos.isPlaying)
+	{
+		if (wasPlaying)
+		{
+			flushAllActiveNotes(midi, 0);
+			wasPlaying = false;
+		}
+		return;
+	}
 
-    // from here we are playing
-    wasPlaying = true;
-    refreshSequenceFromGeneratorIfAvailable();
-    if (!haveSchedule)
-        scheduleNowAtCurrentBar(pos); // requests build on the background thread
+	wasPlaying = true;
 
-    // Fetch the current immutable timeline
-    auto timeline = generator.getCurrentTimeline();
-    if (!timeline)
-        return;
+	refreshSequenceFromGeneratorIfAvailable();
 
-    // If the timeline changed, reset catch-up state
-    if (timeline.get() != lastTimeline.get())
-    {
-        flushAllActiveNotes(midi, 0);
-        didCatchUp = false;
-        lastTimeline = timeline;
-    }
+	if (!haveSchedule)
+		scheduleNowAtCurrentBar(pos);
 
-    // Compute this block's PPQ range using host tempo
-    const double bpm = (pos.bpm > 0.0 ? pos.bpm : (double)sequence.bpm);
-    const double beatsPerSecond = bpm / 60.0;
-    const double secondsPerBlock = (double)buffer.getNumSamples() / sr;
-    const double blockPpqStart = pos.ppqPosition;
-    const double blockPpqEnd = blockPpqStart + secondsPerBlock * beatsPerSecond;
+	auto timeline = generator.getCurrentTimeline();
+	if (!timeline) return;
 
-    // Nothing to do if timeline is entirely outside this block
-    if (timeline->endPPQ <= blockPpqStart || timeline->startPPQ >= blockPpqEnd)
-        return;
+	if (timeline.get() != lastTimeline.get())
+	{
+		flushAllActiveNotes(midi, 0);
+		didCatchUp = false;
+		lastTimeline = timeline;
+	}
 
-    // One-time catch-up so sustained notes already in progress become audible now
-    performCatchUpIfNeeded(pos, timeline, midi, beatsPerSecond);
+	const double bpm = pos.bpm > 0.0 ? pos.bpm : (double)sequence.bpm;
+	const double beatsPerSecond = bpm / 60.0;
+	const double secondsPerBlock = (double)buffer.getNumSamples() / sr;
+	const double blockPpqStart = pos.ppqPosition;
+	const double blockPpqEnd = blockPpqStart + secondsPerBlock * beatsPerSecond;
 
-    // Emit scheduled events that land inside this audio block
-    for (const auto& e : timeline->events)
-    {
-        if (e.ppq < blockPpqStart) continue;
-        if (e.ppq >= blockPpqEnd)  break;
+	if (timeline->endPPQ <= blockPpqStart || timeline->startPPQ >= blockPpqEnd)
+		return;
 
-        const double ppqFromBlockStart = e.ppq - blockPpqStart;
-        const double secondsFromStart = ppqFromBlockStart / beatsPerSecond;
-        int sampleOffset = (int)juce::jlimit(0, buffer.getNumSamples() - 1,
-            (int)std::floor(secondsFromStart * sr + 0.5));
+	performCatchUpIfNeeded(pos, timeline, midi, beatsPerSecond);
 
-        if (e.type == 0) // NoteOn
-        {
-            Key k{ e.channel, e.pitch };
-            if (activeNotes.find(k) != activeNotes.end())
-                continue; // already turned on by catch-up
+	for (const auto& e : timeline->events)
+	{
+		if (e.ppq < blockPpqStart) continue;
+		if (e.ppq >= blockPpqEnd)  break;
 
-            addNoteOn(midi, e.channel, e.pitch, e.velocity, sampleOffset);
-            activeNotes.insert(k);
-        }
-        else // NoteOff
-        {
-            addNoteOff(midi, e.channel, e.pitch, sampleOffset);
-            Key k{ e.channel, e.pitch };
-            activeNotes.erase(k);
-        }
-    }
-}
-void LLMidiAudioProcessor::requestLlmGeneratePattern(const std::string& naturalPrompt,
-    int bars,
-    int stepsPerBar,
-    int defaultVelocity,
-    int channel,
-    int seed)
-{
-    generator.requestLlmGeneratePattern(naturalPrompt, bars, stepsPerBar, defaultVelocity, channel, seed);
+		const double ppqFromBlockStart = e.ppq - blockPpqStart;
+		const double secondsFromStart = ppqFromBlockStart / beatsPerSecond;
+		const int sampleOffset = (int)juce::jlimit(
+			0, buffer.getNumSamples() - 1,
+			(int)std::floor(secondsFromStart * sr + 0.5));
+
+		if (e.type == 0)
+		{
+			Key k{ e.channel, e.pitch };
+			if (activeNotes.find(k) != activeNotes.end())
+				continue;
+
+			addNoteOn(midi, e.channel, e.pitch, e.velocity, sampleOffset);
+			activeNotes.insert(k);
+		}
+		else
+		{
+			addNoteOff(midi, e.channel, e.pitch, sampleOffset);
+			Key k{ e.channel, e.pitch };
+			activeNotes.erase(k);
+		}
+	}
 }
 
-// Scan the timeline at curPPQ and emit NoteOns for any notes that are already "on".
-void LLMidiAudioProcessor::performCatchUpIfNeeded(const juce::AudioPlayHead::CurrentPositionInfo& pos,
-    const std::shared_ptr<const EventTimeline>& timeline,
-    juce::MidiBuffer& midi,
-    double beatsPerSecond)
-{
-    if (didCatchUp || !timeline) return;
-
-    const double curPPQ = pos.ppqPosition;
-
-    // Find notes with onPPQ < curPPQ < offPPQ
-    // We assume NoteOn events have type==0 and NoteOff type==1 for same (channel,pitch)
-    for (size_t i = 0; i < timeline->events.size(); ++i)
-    {
-        const auto& e = timeline->events[i];
-        if (e.type != 0) continue; // NoteOn
-        if (e.ppq >= curPPQ) break;
-
-        // Find its matching NoteOff
-        for (size_t j = i + 1; j < timeline->events.size(); ++j)
-        {
-            const auto& off = timeline->events[j];
-            if (off.type == 1 && off.channel == e.channel && off.pitch == e.pitch)
-            {
-                if (off.ppq > curPPQ)
-                {
-                    // This note is held right now -> emit immediate NoteOn
-                    Key k{ e.channel, e.pitch };
-                    if (activeNotes.find(k) == activeNotes.end())
-                    {
-                        // At start of this block (sampleOffset 0)
-                        addNoteOn(midi, e.channel, e.pitch, e.velocity, 0);
-                        activeNotes.insert(k);
-                    }
-                }
-                break;
-            }
-        }
-    }
-
-    didCatchUp = true;
-}
 bool LLMidiAudioProcessor::hasEditor() const { return true; }
-juce::AudioProcessorEditor* LLMidiAudioProcessor::createEditor() { return new LLMidiAudioProcessorEditor(*this); }
+juce::AudioProcessorEditor* LLMidiAudioProcessor::createEditor()
+{
+	return new LLMidiAudioProcessorEditor(*this);
+}
+
+void LLMidiAudioProcessor::requestLoadModelFromFile(const juce::File& file)
+{
+	LlamaContextParams p;
+	p.n_ctx = 1024;
+	p.n_batch = 2048;
+	p.seed = 12345;
+
+	generator.requestLoadModel(file.getFullPathName().toStdString(), p);
+}
+
+bool         LLMidiAudioProcessor::isModelReady() const { return generator.isModelReady(); }
+juce::String LLMidiAudioProcessor::getLlmStatus() const { return generator.getLastLlmError(); }
+juce::String LLMidiAudioProcessor::getLlmLog() const { return generator.getLogText(); }
+
+void LLMidiAudioProcessor::requestLlmGeneratePattern(const std::string& naturalPrompt,
+	int bars,
+	int stepsPerBar,
+	int defaultVelocity,
+	int channel,
+	int seed)
+{
+	generator.requestLlmGeneratePattern(naturalPrompt, bars, stepsPerBar,
+		defaultVelocity, channel, seed);
+}
+
+void LLMidiAudioProcessor::refreshSequenceFromGeneratorIfAvailable()
+{
+	Sequence newSeq;
+	if (!generator.getLatestGeneratedSequence(newSeq))
+		return;
+
+	const bool shapeChanged =
+		(newSeq.bars != sequence.bars) ||
+		(newSeq.stepsPerBar != sequence.stepsPerBar);
+
+	sequence = newSeq;
+
+	haveSchedule = false;
+	didCatchUp = false;
+
+	if (shapeChanged)
+		activeNotes.clear();
+
+	lastBurnCandidate = sequence;
+}
+
+void LLMidiAudioProcessor::performCatchUpIfNeeded(
+	const juce::AudioPlayHead::CurrentPositionInfo& pos,
+	const std::shared_ptr<const EventTimeline>& timeline,
+	juce::MidiBuffer& midi,
+	double /*beatsPerSecond*/)
+{
+	if (didCatchUp || !timeline) return;
+
+	const double curPPQ = pos.ppqPosition;
+
+	for (size_t i = 0; i < timeline->events.size(); ++i)
+	{
+		const auto& on = timeline->events[i];
+		if (on.type != 0)     continue;
+		if (on.ppq >= curPPQ) break;
+
+		for (size_t j = i + 1; j < timeline->events.size(); ++j)
+		{
+			const auto& off = timeline->events[j];
+			if (off.type == 1 && off.channel == on.channel && off.pitch == on.pitch)
+			{
+				if (off.ppq > curPPQ)
+				{
+					Key k{ on.channel, on.pitch };
+					if (activeNotes.find(k) == activeNotes.end())
+					{
+						addNoteOn(midi, on.channel, on.pitch, on.velocity, 0);
+						activeNotes.insert(k);
+					}
+				}
+				break;
+			}
+		}
+	}
+
+	didCatchUp = true;
+}
+
+void LLMidiAudioProcessor::flushAllActiveNotes(juce::MidiBuffer& midi, int sampleOffset)
+{
+	for (const auto& k : activeNotes)
+		addNoteOff(midi, k.ch, k.pitch, sampleOffset);
+	activeNotes.clear();
+}
+
 void LLMidiAudioProcessor::getStateInformation(juce::MemoryBlock&) {}
 void LLMidiAudioProcessor::setStateInformation(const void*, int) {}
 
-juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new LLMidiAudioProcessor(); }
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+	return new LLMidiAudioProcessor();
+}

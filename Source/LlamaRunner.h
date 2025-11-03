@@ -3,53 +3,55 @@
 #include <vector>
 #include <memory>
 #include <mutex>
+#include <functional>
+
 struct LlamaContextParams {
-    int   n_ctx = 2048;
-    int   n_batch = 512;
-    int   n_gpu_layers = 0;     // CPU-only: keep 0
-    int   seed = 12345;
-    bool  low_vram = false; // reserved for GPU builds
+	int   n_ctx = 2048;
+	int   n_batch = 512;
+	int   n_gpu_layers = 0; // CPU-only
+	int   seed = 12345;
+	bool  low_vram = false; // reserved for GPU builds
 };
 
 struct LlamaInferParams {
-    float temperature = 0.3f;
-    float top_p = 0.9f;
-    int   top_k = 40;
-    float repeat_penalty = 1.1f;
-    int   max_tokens = 512;
-    int   seed = -1;   // -1 = use context seed
-    std::vector<std::string> stop;   // optional stop strings
-    std::string grammar;            // optional grammar text (empty = off)
+	float temperature = 0.3f;
+	float top_p = 0.9f;
+	int   top_k = 40;
+	float repeat_penalty = 1.1f;
+	int   max_tokens = 512;
+	int   seed = -1;   // -1 = use context seed
+	std::vector<std::string> stop;   // optional stop strings
+	std::string grammar;              // optional grammar text (empty = off)
 };
 
 class LlamaRunner {
 public:
-    LlamaRunner();
-    ~LlamaRunner();
+	using LogFn = std::function<void(const std::string&)>;
 
-    // Non-copyable
-    LlamaRunner(const LlamaRunner&) = delete;
-    LlamaRunner& operator=(const LlamaRunner&) = delete;
+	LlamaRunner();
+	~LlamaRunner();
 
-    bool loadModel(const std::string& modelPath,
-        const LlamaContextParams& p,
-        std::string& errorOut);
+	LlamaRunner(const LlamaRunner&) = delete;
+	LlamaRunner& operator=(const LlamaRunner&) = delete;
 
-    void unload();
-    std::string getLoadedModelPath() const;
-    bool isLoaded() const;
+	bool loadModel(const std::string& modelPath,
+		const LlamaContextParams& p,
+		std::string& errorOut);
 
-    // Synchronous. Call from your background worker only.
-    // Returns generated text. On failure, returns empty string and sets errorOut (if provided).
-    std::string generate(const std::string& prompt,
-        const LlamaInferParams& ip,
-        double* outTokensPerSec = nullptr,
-        std::string* errorOut = nullptr);
+	void unload();
+	std::string getLoadedModelPath() const;
+	bool isLoaded() const;
+
+	std::string generate(const std::string& prompt,
+		const LlamaInferParams& ip,
+		double* outTokensPerSec,
+		std::string* errorOut,
+		LogFn onLog);
 
 private:
-    struct Impl;
-    std::unique_ptr<Impl> impl;
-    bool modelLoaded_ = false;
-    mutable std::mutex stateMutex_;
-    std::string loadedModelPath_;
+	struct Impl;
+	std::unique_ptr<Impl> impl;
+	bool modelLoaded_ = false;
+	mutable std::mutex stateMutex_;
+	std::string loadedModelPath_;
 };

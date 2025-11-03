@@ -20,15 +20,23 @@
             file="Source/sequence_json_grammar.h"/>
     </GROUP>
     <GROUP id="{24C3577B-D3AE-F336-CF81-950D8E84F20F}" name="Source">
+      <GROUP id="{97A970FD-7F13-47D7-3789-435F00225911}" name="Sequence">
+        <FILE id="qqxnyA" name="NoteUtils.cpp" compile="1" resource="0" file="Source/NoteUtils.cpp"/>
+        <FILE id="yBvyoD" name="NoteUtils.h" compile="0" resource="0" file="Source/NoteUtils.h"/>
+        <FILE id="r1RAT3" name="SequenceModel.h" compile="0" resource="0" file="Source/SequenceModel.h"/>
+        <FILE id="eaiyEL" name="SequenceValidator.cpp" compile="1" resource="0"
+              file="Source/SequenceValidator.cpp"/>
+        <FILE id="VXjknd" name="SequenceValidator.h" compile="0" resource="0"
+              file="Source/SequenceValidator.h"/>
+      </GROUP>
+      <FILE id="oYQP7l" name="BackgroundGenerator.cpp" compile="1" resource="0"
+            file="Source/BackgroundGenerator.cpp"/>
       <FILE id="hScv0R" name="BackgroundGenerator.h" compile="0" resource="0"
             file="Source/BackgroundGenerator.h"/>
       <FILE id="Lx9smE" name="Timeline.h" compile="0" resource="0" file="Source/Timeline.h"/>
       <FILE id="ta4xAF" name="MidiScheduler.cpp" compile="1" resource="0"
             file="Source/MidiScheduler.cpp"/>
       <FILE id="wIcnNE" name="MidiScheduler.h" compile="0" resource="0" file="Source/MidiScheduler.h"/>
-      <FILE id="feWar5" name="SequenceModel.cpp" compile="1" resource="0"
-            file="Source/SequenceModel.cpp"/>
-      <FILE id="r1RAT3" name="SequenceModel.h" compile="0" resource="0" file="Source/SequenceModel.h"/>
       <FILE id="A6y8AL" name="PluginProcessor.cpp" compile="1" resource="0"
             file="Source/PluginProcessor.cpp"/>
       <FILE id="EhLiGZ" name="PluginProcessor.h" compile="0" resource="0"
