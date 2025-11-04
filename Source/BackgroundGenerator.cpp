@@ -105,52 +105,48 @@ namespace
             if (log) log("Coerce: padded missing bars to match requested bar count.");
         }
     }
-    // Strict JSON array of bars; no whitespace allowed.
+    static std::string makeSimpleTestGrammar() {
+        return R"(
+root ::= "[" "]"
+)";
+    }
     static std::string makeJsonPatternGrammar(int bars, int steps) {
         std::ostringstream g;
-        const char* nl = "\n";
 
-        g << "root  ::= bars" << nl;
+        if (bars == 1) {
+            g << "root ::= \"[\" bar \"]\"\n";
+        }
+        else {
+            g << "root ::= \"[\" bar";
+            for (int i = 1; i < bars; ++i) {
+                g << " \",\" bar";
+            }
+            g << " \"]\"\n";
+        }
 
-        // bars: "[" bar ("," bar)* "]" — exactly `bars` bars
-        g << "bars  ::= \"[\" bar";
-        for (int i = 1; i < bars; ++i) g << ",bar";
-        g << "]" << nl;
+        if (steps == 1) {
+            g << "bar ::= \"[\" step \"]\"\n";
+        }
+        else {
+            g << "bar ::= \"[\" step";
+            for (int i = 1; i < steps; ++i) {
+                g << " \",\" step";
+            }
+            g << " \"]\"\n";
+        }
 
-        // bar: "[" step ("," step)* "]" — exactly `steps` steps
-        g << "bar   ::= \"[\" step";
-        for (int i = 1; i < steps; ++i) g << ",step";
-        g << "]" << nl;
-
-        // step kinds
-        g << "step  ::= rest | sustain | note | chord" << nl;
-
-        // JSON strings "." and "-"
-        g << "rest     ::= \"\\\".\\\"\"" << nl;
-        g << "sustain  ::= \"\\\"-\\\"\"" << nl;
-
-        // chord: "[" note ("," note)* "]" — allow 1+ notes (more robust)
-        g << "chord    ::= \"[\" note (\",\" note)* \"]\"" << nl;  // <<< FIXED HERE
-
-        // note: "pitch" "octave" optional "-velocity"
-        g << "note     ::= \"\\\"\" pitch octave velopt \"\\\"\"" << nl;
-
-        // epsilon is the empty alternative per GBNF docs
-        g << "velopt   ::= | \"-\" digit digit? digit?" << nl;
-
-        g << "pitch    ::= "
-            "\"C\"|\"C#\"|\"Db\"|\"D\"|\"D#\"|\"Eb\"|\"E\"|\"F\"|\"F#\"|\"Gb\"|"
-            "\"G\"|\"G#\"|\"Ab\"|\"A\"|\"A#\"|\"Bb\"|\"B\"" << nl;
-
-        // optional leading minus, then 1+ digits
-        g << "octave   ::= \"-\"? digit+" << nl;
-
-        g << "digit    ::= \"0\"|\"1\"|\"2\"|\"3\"|\"4\"|\"5\"|\"6\"|\"7\"|\"8\"|\"9\"" << nl;
+        g << "step ::= rest | sustain | note | chord\n";
+        g << "rest ::= \"\\\"\" \".\" \"\\\"\"\n";
+        g << "sustain ::= \"\\\"\" \"-\" \"\\\"\"\n";
+        g << "chord ::= \"[\" note (\",\" note)+ \"]\"\n";
+        g << "note ::= \"\\\"\" pitch octave velopt \"\\\"\"\n";
+        g << "velopt ::= \"\" | \"-\" digit digit? digit?\n";
+        g << "pitch ::= \"C\" | \"C#\" | \"Db\" | \"D\" | \"D#\" | \"Eb\" | \"E\" | \"F\" | \"F#\" | \"Gb\" | \"G\" | \"G#\" | \"Ab\" | \"A\" | \"A#\" | \"Bb\" | \"B\"\n";
+        g << "octave ::= \"-\"? digit+\n";
+        g << "digit ::= [0-9]\n";
 
         return g.str();
     }
-    // Remove leading/trailing Markdown code fences and language tags, if present.
-// Returns true if a fence was stripped.
     static bool stripMarkdownFence(std::string& s) {
         size_t open = s.find("```");
         if (open == std::string::npos) return false;
@@ -408,10 +404,10 @@ void BackgroundGenerator::runPatternGeneration(const GenRequest& req)
     ip.top_p = 0.90f;
     ip.top_k = 0;
     ip.repeat_penalty = 1.05f;
-    ip.max_tokens = 256;
+    ip.max_tokens = 512;
     ip.seed = req.seed;
     ip.grammar.clear();
-    ip.grammar = makeJsonPatternGrammar(req.bars, req.steps);
+    //ip.grammar = makeSimpleTestGrammar();
     ip.stop.clear();
     ip.stop.push_back("```");
     ip.stop.push_back("<|end|>");
@@ -543,9 +539,19 @@ std::string BackgroundGenerator::buildPrompt(bool isPhi,
         << "  \"-\"  = sustain previous note/chord\n"
         << "  \"A#3\" or \"A#3-80\" = note (velocity 1..127)\n"
         << "  [\"A#3\",\"C4-90\", ...] = chord (2+ notes)\n"
-        << "No text before '[' and nothing after the final ']'.\n"
+        << "Rules:\n"
+        << "  - No text before '[' and nothing after the final ']'.\n"
+        << "  - If two or more notes sound at the same time, use a JSON array (a chord).\n"
+        << "  - Use at least 3 chord steps per 8 bars.\n"
+        << "  - Keep velocities mostly in 60..110 unless specified.\n"
+        << "\n"
+        << "EXAMPLE (format only):\n"
+        << "[\n"
+        << "  [\"C4\",\"-\",[\"C4\",\"E4\",\"G4-95\"],\".\"],\n"
+        << "  [[\"A3\",\"C4-90\"],\"-\",\".\",\"G3-64\"]\n"
+        << "]\n"
+        << "\n"
         << "Style: " << user << "\n";
-
     std::ostringstream prompt;
     if (isPhi)
     {

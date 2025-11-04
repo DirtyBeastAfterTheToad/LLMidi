@@ -4,7 +4,8 @@
               addUsingNamespaceToJuceHeader="0" jucerFormatVersion="1" companyName="DirtyBeastAfterTheToad"
               companyWebsite="https://rallem.com" companyEmail="dirtbeastafterthetoad@gmail.com"
               pluginCharacteristicsValue="pluginIsSynth,pluginProducesMidiOut"
-              headerPath="..\..\third_party\llama.cpp; &#10;..\..\third_party\llama.cpp\include;&#10;..\..\third_party\llama.cpp\ggml\include;">
+              headerPath="..\..\third_party\llama.cpp; &#10;..\..\third_party\llama.cpp\include;&#10;..\..\third_party\llama.cpp\ggml\include;"
+              pluginFormats="buildAU,buildVST3">
   <MAINGROUP id="JOcAbT" name="LLMidi">
     <GROUP id="{6FC6456B-2AAE-36B4-2ED9-24588A207D63}" name="LLM">
       <FILE id="nBcMC2" name="LlamaRunner.cpp" compile="1" resource="0" file="Source/LlamaRunner.cpp"/>
@@ -16,8 +17,6 @@
             file="Source/LlmSequenceParser.cpp"/>
       <FILE id="qL3S0u" name="LlmSequenceParser.h" compile="0" resource="0"
             file="Source/LlmSequenceParser.h"/>
-      <FILE id="VfRNdh" name="sequence_json_grammar.h" compile="0" resource="0"
-            file="Source/sequence_json_grammar.h"/>
     </GROUP>
     <GROUP id="{24C3577B-D3AE-F336-CF81-950D8E84F20F}" name="Source">
       <GROUP id="{97A970FD-7F13-47D7-3789-435F00225911}" name="Sequence">
