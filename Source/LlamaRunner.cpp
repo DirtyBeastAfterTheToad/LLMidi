@@ -132,51 +132,33 @@ namespace {
         return true;
     }
 
-    // --- grammar-aware sampler chain ---
-    inline std::pair<llama_sampler*, bool> build_sampler_chain_grammar_aware(
+    // --- sampler chain ---
+    inline llama_sampler* build_sampler_chain(
         const LlamaInferParams& ip,
-        const llama_vocab* vocab,
         uint32_t seed,
         std::string* errorOut,
         LlamaRunner::LogFn onLog) {
 
         auto sparams = llama_sampler_chain_default_params();
         llama_sampler* chain = llama_sampler_chain_init(sparams);
-        bool grammarActive = false;
 
-        if (ip.grammar.empty()) {
-            if (ip.repeat_penalty != 1.0f)
-                llama_sampler_chain_add(chain,
-                    llama_sampler_init_penalties(64, ip.repeat_penalty, 0.0f, 0.0f));
-            if (ip.top_k > 0)
-                llama_sampler_chain_add(chain, llama_sampler_init_top_k(ip.top_k));
-            if (ip.top_p > 0.0f && ip.top_p < 1.0f)
-                llama_sampler_chain_add(chain, llama_sampler_init_top_p(ip.top_p, 1));
+        if (ip.repeat_penalty != 1.0f)
+            llama_sampler_chain_add(chain,
+                llama_sampler_init_penalties(64, ip.repeat_penalty, 0.0f, 0.0f));
+        if (ip.top_k > 0)
+            llama_sampler_chain_add(chain, llama_sampler_init_top_k(ip.top_k));
+        if (ip.top_p > 0.0f && ip.top_p < 1.0f)
+            llama_sampler_chain_add(chain, llama_sampler_init_top_p(ip.top_p, 1));
 
-            if (ip.temperature > 0.0f) {
-                llama_sampler_chain_add(chain, llama_sampler_init_temp(ip.temperature));
-                llama_sampler_chain_add(chain, llama_sampler_init_dist(seed));
-            }
-            else {
-                llama_sampler_chain_add(chain, llama_sampler_init_greedy());
-            }
+        if (ip.temperature > 0.0f) {
+            llama_sampler_chain_add(chain, llama_sampler_init_temp(ip.temperature));
+            llama_sampler_chain_add(chain, llama_sampler_init_dist(seed));
         }
         else {
             llama_sampler_chain_add(chain, llama_sampler_init_greedy());
         }
 
-        if (!ip.grammar.empty()) {
-            if (auto* g = llama_sampler_init_grammar(vocab, ip.grammar.c_str(), "root")) {
-                llama_sampler_chain_add(chain, g);
-                grammarActive = true;
-            }
-            else {
-                appendLine(errorOut, "grammar init failed; falling back to non-grammar sampling");
-                if (onLog) onLog("grammar init failed; falling back to non-grammar sampling");
-            }
-        }
-
-        return { chain, grammarActive };
+        return chain;
     }
 
 } // namespace
@@ -275,33 +257,21 @@ std::string LlamaRunner::generate(const std::string& prompt,
     const auto tAfterPrompt = clock::now();
     emitLog("Prompt ingested OK. Starting sampling...", errorOut, onLog);
 
-    // grammar-aware setup (deterministic when grammar is used)
     LlamaInferParams ip = inParams;
-    if (!ip.grammar.empty()) {
-        ip.temperature = 0.0f;
-        ip.top_k = 0;
-        ip.top_p = 1.0f;
-        ip.repeat_penalty = 1.0f;
-    }
 
     const uint32_t seedUse = ip.seed >= 0 ? (uint32_t)ip.seed : (uint32_t)impl->seed;
-    auto [chain, grammarActive] =
-        build_sampler_chain_grammar_aware(ip, vocab, seedUse, errorOut, onLog);
+    llama_sampler* chain =
+        build_sampler_chain(ip, seedUse, errorOut, onLog);
 
     const llama_token eos_tok = llama_vocab_eos(vocab);
-    if (!grammarActive) {
-        llama_logit_bias lb{ eos_tok, -10.0f };
-        llama_sampler* eosBlocker =
-            llama_sampler_init_logit_bias(llama_vocab_n_tokens(vocab), 1, &lb);
-        llama_sampler_chain_add(chain, eosBlocker);
+    llama_logit_bias lb{ eos_tok, -10.0f };
+    llama_sampler* eosBlocker =
+        llama_sampler_init_logit_bias(llama_vocab_n_tokens(vocab), 1, &lb);
+    llama_sampler_chain_add(chain, eosBlocker);
 
-        // seed sampler with prompt only if no grammar
-        for (auto t : prompt_tokens)
-            llama_sampler_accept(chain, t);
-    }
-    else {
-        emitLog("Grammar active: sampler not seeded with prompt.", errorOut, onLog);
-    }
+    // seed sampler with prompt
+    for (auto t : prompt_tokens)
+        llama_sampler_accept(chain, t);
 
     // generation
     const auto tGenStart = clock::now();
@@ -319,8 +289,6 @@ std::string LlamaRunner::generate(const std::string& prompt,
 
         llama_sampler_accept(chain, next);
         out_tokens.push_back(next);
-
-        if (!grammarActive && next == eos_tok) { stopReason = "eos"; break; }
 
         // advance KV
         llama_batch b{};
