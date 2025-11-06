@@ -204,7 +204,7 @@ void LLMidiAudioProcessor::requestLoadModelFromFile(const juce::File& file)
 bool         LLMidiAudioProcessor::isModelReady() const { return generator.isModelReady(); }
 juce::String LLMidiAudioProcessor::getLlmStatus() const { return generator.getLastLlmError(); }
 juce::String LLMidiAudioProcessor::getLlmLog() const { return generator.getLogText(); }
-
+void LLMidiAudioProcessor::clearLlmLog() { generator.clearLog(); }
 void LLMidiAudioProcessor::requestLlmGeneratePattern(const std::string& naturalPrompt,
 	int bars,
 	int stepsPerBar,

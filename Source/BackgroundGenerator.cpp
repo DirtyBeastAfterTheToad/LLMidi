@@ -307,14 +307,19 @@ void BackgroundGenerator::processModelRequests()
 	{
 		lastLlmError = "Model load OK: " + juce::String(modelPath.c_str());
 		appendLog(lastLlmError);
+		loadedModelPath = modelPath;
 	}
 	else
 	{
+		loadedModelPath.clear();
 		lastLlmError = "Model load FAILED: " + juce::String(err);
 		appendLog(lastLlmError);
 	}
 }
-
+juce::String BackgroundGenerator::getLoadedModelPath() const
+{
+	return juce::String(loadedModelPath.c_str());
+}
 void BackgroundGenerator::runPatternGeneration(const GenRequest& req)
 {
 	if (!runner || !modelReady.load())
@@ -589,8 +594,11 @@ std::optional<ParsedPhrase> BackgroundGenerator::sanitizeAndParse(const std::str
 	return phrase;
 }
 
-
-
+void BackgroundGenerator::clearLog()
+{
+	const juce::ScopedLock sl(logLock);
+	logLines.clear();
+}
 
 void BackgroundGenerator::appendLog(const juce::String& line)
 {

@@ -60,7 +60,14 @@ public:
 		int defaultVelocity,
 		int channel,
 		int seed);
+	void setLastPrompt(const juce::String& s) { lastPrompt = s; }
+	juce::String getLastPrompt() const { return lastPrompt; }
+	juce::String getLoadedModelPath() const { return generator.getLoadedModelPath(); }
+	void        setLastSeed(int s) { lastSeed = s; }
+	int         getLastSeed()         const { return lastSeed; }
 
+	bool        hasBurnCandidate()    const { return lastBurnCandidate.bars > 0; }
+	void clearLlmLog();
 private:
 	// --- Helpers ---
 	bool getHostPosition(juce::AudioPlayHead::CurrentPositionInfo& info) const;
@@ -79,9 +86,7 @@ private:
 			return a.ch < b.ch || (a.ch == b.ch && a.pitch < b.pitch);
 		}
 	};
-
-private:
-	// Host timing cache
+	juce::String lastPrompt;
 	double sr = 44100.0;
 	int    spb = 512;
 
@@ -102,7 +107,7 @@ private:
 	bool wasPlaying = false;
 
 	// Editor helpers
+	int lastSeed = -1;
 	Sequence lastBurnCandidate;
-
 	JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LLMidiAudioProcessor)
 };
