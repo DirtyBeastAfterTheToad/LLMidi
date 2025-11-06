@@ -363,6 +363,7 @@ void LLMidiAudioProcessorEditor::onClickGenerate()
 	genProgressBar.setVisible(true);
 	genStageLabel.setVisible(true);
 	genStageLabel.setText("Ingesting prompt...", juce::dontSendNotification);
+	genStageLabel.setColour(juce::Label::textColourId, juce::Colours::white);
 
 	stopButton.setVisible(true);
 	stopButton.setEnabled(true);
@@ -378,12 +379,37 @@ void LLMidiAudioProcessorEditor::onClickToggleLogs()
 void LLMidiAudioProcessorEditor::updateGenProgress()
 {
 	const juce::String bgLog = audioProcessor.getLlmLog();
+
+	// If user canceled this run, do not resurrect UI based on logs
 	if (canceledThisRun)
 	{
 		genProgressBar.setActive(false);
 		return;
 	}
 
+	// -------- Error detection (fail fast) ----------
+	const bool hasParseErr = bgLog.containsIgnoreCase("parse error")
+		|| bgLog.containsIgnoreCase("salvage also failed");
+	const bool hasEmptyPhrase = bgLog.containsIgnoreCase("pattern gen: empty phrase after parse");
+	const bool hasEmptyRaw = bgLog.containsIgnoreCase("pattern gen failed: empty raw output");
+	const bool hasLlmErr = bgLog.containsIgnoreCase("llm error:");
+	const bool decodeFail = bgLog.containsIgnoreCase("stop reason: decode_fail");
+
+	if (hasParseErr || hasEmptyPhrase || hasEmptyRaw || hasLlmErr || decodeFail)
+	{
+		generationActive = false;
+
+		genProgressBar.setActive(false);
+		genProgressBar.setVisible(false);
+
+		genStageLabel.setVisible(true);
+		genStageLabel.setText("Generation failed — check log.", juce::dontSendNotification);
+		genStageLabel.setColour(juce::Label::textColourId, juce::Colours::orangered);
+
+		stopButton.setVisible(false);
+		stopButton.setEnabled(false);
+		return;
+	}
 	if (!generationActive)
 	{
 		const bool midPrompt = bgLog.lastIndexOf("Prompt [") >= 0;
@@ -396,6 +422,7 @@ void LLMidiAudioProcessorEditor::updateGenProgress()
 			genProgressBar.setVisible(true);
 			genStageLabel.setVisible(true);
 			genProgressBar.setActive(true);
+
 			stopButton.setVisible(true);
 			stopButton.setEnabled(true);
 		}
@@ -406,6 +433,7 @@ void LLMidiAudioProcessorEditor::updateGenProgress()
 		}
 	}
 
+	// Completion
 	if (bgLog.containsIgnoreCase("sequence ready"))
 	{
 		genProgress = 1.0;
@@ -413,9 +441,13 @@ void LLMidiAudioProcessorEditor::updateGenProgress()
 		genProgressBar.setActive(false);
 		genStageLabel.setText("Ready to burn!", juce::dontSendNotification);
 		generationActive = false;
+
+		stopButton.setVisible(false);
+		stopButton.setEnabled(false);
 		return;
 	}
 
+	// Progress parsing
 	const int lastPrompt = bgLog.lastIndexOf("Prompt [");
 	const int lastGen = bgLog.lastIndexOf("Gen [");
 	const int useIdx = juce::jmax(lastPrompt, lastGen);
