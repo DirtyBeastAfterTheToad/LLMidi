@@ -68,6 +68,7 @@ public:
 
 	bool        hasBurnCandidate()    const { return lastBurnCandidate.bars > 0; }
 	void clearLlmLog();
+	void cancelLlmGeneration();
 private:
 	// --- Helpers ---
 	bool getHostPosition(juce::AudioPlayHead::CurrentPositionInfo& info) const;

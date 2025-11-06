@@ -47,7 +47,7 @@ public:
 		double* outTokensPerSec,
 		std::string* errorOut,
 		LogFn onLog);
-
+	void requestCancel();
 private:
 	struct Impl;
 	std::unique_ptr<Impl> impl;

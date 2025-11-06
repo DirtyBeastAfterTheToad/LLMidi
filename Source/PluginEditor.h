@@ -41,7 +41,9 @@ private:
 	struct Ui
 	{
 		static constexpr int windowW = 500;
-		static constexpr int windowH = 500;
+		static constexpr int windowH = 330;
+		static constexpr int logsExtraH = 220;
+
 		static constexpr int pad = 10;
 		static constexpr int rowGap = 6;
 		static constexpr int titleH = 24;
@@ -54,9 +56,13 @@ private:
 		static constexpr int seedEditW = 100;
 		static constexpr int modelRowH = 20;
 		static constexpr int genRowH = 26;
+		static constexpr int seedRerollW = 70;
 	};
 
 private:
+	void onClickStop();
+	void updateWindowSizeForLogs();
+	void onClickReroll();
 	// Processor reference
 	LLMidiAudioProcessor& audioProcessor;
 
@@ -75,8 +81,11 @@ private:
 	AnimatedProgressBar genProgressBar;
 	juce::Label genStageLabel{ "genStage", "" };
 
+	juce::TextButton stopButton{ "Stop" };
+
 	juce::Label      seedLabel{ "seedLabel",   "Seed:" };
 	juce::TextEditor seedEditor;
+	juce::TextButton rerollButton{ "Reroll" }; // NEW
 
 	juce::Label      promptLabel{ "promptLabel", "Prompt:" };
 	juce::TextEditor promptEditor;
@@ -85,6 +94,7 @@ private:
 	bool logsVisible = false;
 	bool modelLoadingFlag = false;
 	bool generationActive = false;
+	bool canceledThisRun = false;
 	// Async file chooser for model
 	std::unique_ptr<juce::FileChooser> modelChooser;
 

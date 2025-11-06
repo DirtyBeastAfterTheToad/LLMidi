@@ -286,6 +286,18 @@ void LLMidiAudioProcessor::flushAllActiveNotes(juce::MidiBuffer& midi, int sampl
 void LLMidiAudioProcessor::getStateInformation(juce::MemoryBlock&) {}
 void LLMidiAudioProcessor::setStateInformation(const void*, int) {}
 
+void LLMidiAudioProcessor::cancelLlmGeneration()
+{
+	generator.requestCancelGeneration();
+}
+
+void LLMidiAudioProcessorEditor::onClickReroll()
+{
+	seedEditor.setText("-1", juce::dontSendNotification);
+	audioProcessor.setLastSeed(-1);
+	appendUiLogLine("[UI] Seed reset to -1 (reroll).");
+}
+
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
 	return new LLMidiAudioProcessor();

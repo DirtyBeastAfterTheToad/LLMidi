@@ -627,3 +627,11 @@ void BackgroundGenerator::appendLog(const juce::String& line)
 			logLines.remove(0);
 	}
 }
+void BackgroundGenerator::requestCancelGeneration()
+{
+	if (runner)
+	{
+		appendLog("[[PROGRESS]] Canceling generation...");
+		runner->requestCancel();
+	}
+}

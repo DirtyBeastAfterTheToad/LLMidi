@@ -5,13 +5,18 @@ LLMidiAudioProcessorEditor::LLMidiAudioProcessorEditor(LLMidiAudioProcessor& p)
 	: AudioProcessorEditor(&p)
 	, audioProcessor(p)
 {
-	setSize(Ui::windowW, Ui::windowH);
+	updateWindowSizeForLogs();
 	setupUi();
 	startTimerHz(10);
 }
 
 LLMidiAudioProcessorEditor::~LLMidiAudioProcessorEditor()
 {
+}
+void LLMidiAudioProcessorEditor::updateWindowSizeForLogs()
+{
+	const int targetH = Ui::windowH + (logsVisible ? Ui::logsExtraH : 0);
+	setSize(Ui::windowW, targetH);
 }
 
 void LLMidiAudioProcessorEditor::paint(juce::Graphics& g)
@@ -56,6 +61,8 @@ void LLMidiAudioProcessorEditor::resized()
 		auto row = r.removeFromTop(Ui::seedRowH);
 		seedLabel.setBounds(row.removeFromLeft(Ui::seedLabelW));
 		seedEditor.setBounds(row.removeFromLeft(Ui::seedEditW));
+		row.removeFromLeft(6);
+		rerollButton.setBounds(row.removeFromLeft(Ui::seedRerollW));
 	}
 
 	r.removeFromTop(Ui::rowGap);
@@ -63,8 +70,16 @@ void LLMidiAudioProcessorEditor::resized()
 	// Row 4: Generation progress
 	{
 		auto row = r.removeFromTop(Ui::genRowH);
-		genProgressBar.setBounds(row.removeFromLeft(row.getWidth() * 2 / 3).reduced(2));
-		genStageLabel.setBounds(row);
+
+		constexpr int stopW = 70;
+		constexpr int labelW = 180;
+		auto stopArea = row.removeFromRight(stopW);
+		auto labelArea = row.removeFromRight(labelW);
+		auto barArea = row;
+
+		genProgressBar.setBounds(barArea.reduced(2));
+		genStageLabel.setBounds(labelArea.reduced(2));
+		stopButton.setBounds(stopArea.reduced(2));
 	}
 
 	r.removeFromTop(Ui::rowGap);
@@ -143,6 +158,14 @@ void LLMidiAudioProcessorEditor::setupButtons()
 
 	addAndMakeVisible(logToggleButton);
 	logToggleButton.onClick = [this] { onClickToggleLogs(); };
+
+	addAndMakeVisible(stopButton);
+	stopButton.onClick = [this] { onClickStop(); };
+	stopButton.setVisible(false);
+
+	addAndMakeVisible(rerollButton);
+	rerollButton.setTooltip("Set seed to -1 (random each run)");
+	rerollButton.onClick = [this] { onClickReroll(); };
 }
 
 void LLMidiAudioProcessorEditor::setupEditors()
@@ -161,6 +184,7 @@ void LLMidiAudioProcessorEditor::setupEditors()
 	logEditor.setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::yellow.withAlpha(0.4f));
 	logEditor.setScrollToShowCursor(false);
 	logEditor.setVisible(false);
+
 	// Seed
 	addAndMakeVisible(seedLabel);
 	seedLabel.setColour(juce::Label::textColourId, juce::Colours::white);
@@ -199,7 +223,7 @@ void LLMidiAudioProcessorEditor::setupEditors()
 	promptEditor.setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::yellow.withAlpha(0.4f));
 	promptEditor.setFont(juce::FontOptions(14.0f));
 
-	//  Model row 
+	//  Model row
 	addAndMakeVisible(modelLabel);
 	modelLabel.setColour(juce::Label::textColourId, juce::Colours::white);
 	modelLabel.setFont(juce::FontOptions(13.0f));
@@ -217,7 +241,7 @@ void LLMidiAudioProcessorEditor::setupEditors()
 	modelLoading.setFont(juce::FontOptions(13.0f));
 	modelLoading.setVisible(false);
 
-	//  Generation progress row 
+	//  Generation progress row
 	addAndMakeVisible(genProgressBar);
 	genProgressBar.setVisible(false);
 	genProgressBar.setProgress(0.0);
@@ -225,11 +249,13 @@ void LLMidiAudioProcessorEditor::setupEditors()
 	addAndMakeVisible(genStageLabel);
 	genStageLabel.setColour(juce::Label::textColourId, juce::Colours::white);
 	genStageLabel.setFont(juce::FontOptions(13.0f));
+	genStageLabel.setMinimumHorizontalScale(0.8f);
 	genStageLabel.setText("", juce::dontSendNotification);
 	genStageLabel.setVisible(false);
 
 	const bool hasCandidate = audioProcessor.hasBurnCandidate();
-	const bool logSaysReady = audioProcessor.getLlmLog().containsIgnoreCase("sequence ready");
+	const juce::String logNow = hasCandidate ? audioProcessor.getLlmLog() : juce::String();
+	const bool logSaysReady = hasCandidate && logNow.containsIgnoreCase("sequence ready");
 
 	if (hasCandidate && logSaysReady)
 	{
@@ -239,6 +265,9 @@ void LLMidiAudioProcessorEditor::setupEditors()
 		genProgressBar.setVisible(true);
 		genStageLabel.setVisible(true);
 		genStageLabel.setText("Ready to burn!", juce::dontSendNotification);
+
+		stopButton.setVisible(false);
+		stopButton.setEnabled(false);
 	}
 	else
 	{
@@ -248,8 +277,31 @@ void LLMidiAudioProcessorEditor::setupEditors()
 		genProgressBar.setVisible(false);
 		genStageLabel.setVisible(false);
 		genStageLabel.setText("", juce::dontSendNotification);
+
+		const bool midPrompt = logNow.lastIndexOf("Prompt [") >= 0;
+		const bool midGen = logNow.lastIndexOf("Gen [") >= 0;
+		const bool done = logNow.containsIgnoreCase("sequence ready");
+
+		if ((midPrompt || midGen) && !done)
+		{
+			generationActive = true;
+			genProgressBar.setVisible(true);
+			genStageLabel.setVisible(true);
+			genProgressBar.setActive(true);
+			genStageLabel.setText(midPrompt ? "Ingesting prompt..." : "Generating the pattern...",
+				juce::dontSendNotification);
+
+			stopButton.setVisible(true);
+			stopButton.setEnabled(true);
+		}
+		else
+		{
+			stopButton.setVisible(false);
+			stopButton.setEnabled(false);
+		}
 	}
 }
+
 
 void LLMidiAudioProcessorEditor::onClickLoadModel()
 {
@@ -303,7 +355,7 @@ void LLMidiAudioProcessorEditor::onClickGenerate()
 
 	seedEditor.setText(juce::String(seedToUse), juce::dontSendNotification);
 
-
+	canceledThisRun = false;
 	generationActive = true;
 	genProgress = 0.0;
 	genProgressBar.setProgress(0.0);
@@ -312,16 +364,25 @@ void LLMidiAudioProcessorEditor::onClickGenerate()
 	genStageLabel.setVisible(true);
 	genStageLabel.setText("Ingesting prompt...", juce::dontSendNotification);
 
+	stopButton.setVisible(true);
+	stopButton.setEnabled(true);
+
 }
 
 void LLMidiAudioProcessorEditor::onClickToggleLogs()
 {
 	logsVisible = !logsVisible;
+	updateWindowSizeForLogs();
 	resized();
 }
 void LLMidiAudioProcessorEditor::updateGenProgress()
 {
 	const juce::String bgLog = audioProcessor.getLlmLog();
+	if (canceledThisRun)
+	{
+		genProgressBar.setActive(false);
+		return;
+	}
 
 	if (!generationActive)
 	{
@@ -335,6 +396,8 @@ void LLMidiAudioProcessorEditor::updateGenProgress()
 			genProgressBar.setVisible(true);
 			genStageLabel.setVisible(true);
 			genProgressBar.setActive(true);
+			stopButton.setVisible(true);
+			stopButton.setEnabled(true);
 		}
 		else
 		{
@@ -455,3 +518,17 @@ int LLMidiAudioProcessorEditor::readSeedOrRandom() const
 	if (s <= 0) s = std::abs(s) + 1;
 	return s;
 }
+
+void LLMidiAudioProcessorEditor::onClickStop()
+{
+	audioProcessor.cancelLlmGeneration();
+	canceledThisRun = true;
+	generationActive = false;
+	genProgressBar.setActive(false);
+	genProgressBar.setVisible(false);
+	genStageLabel.setText("Canceled", juce::dontSendNotification);
+
+	stopButton.setVisible(false);
+	stopButton.setEnabled(false);
+}
+
