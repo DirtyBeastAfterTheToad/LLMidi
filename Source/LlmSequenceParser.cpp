@@ -40,6 +40,16 @@ namespace {
 			}
 		}
 
+		// Handle minor and major chords and normalize
+		if (core.find("min") != std::string::npos || core.find("m") != std::string::npos) {
+			// Handle minor: for example, "Emin" -> "E4"
+			core = core.substr(0, core.find_first_of("m")) + "4";  // or whatever octave makes sense
+		}
+		else if (core.find("maj") != std::string::npos || core.find("M") != std::string::npos) {
+			// Handle major: for example, "Cmaj" -> "C4"
+			core = core.substr(0, core.find_first_of("maj")) + "4";  // or whatever octave makes sense
+		}
+
 		// find root (A–G) + optional accidental
 		size_t i = 0;
 		while (i < core.size() && std::isspace((unsigned char)core[i])) ++i;
@@ -55,23 +65,13 @@ namespace {
 			++i;
 		}
 
-		// look ahead: if the remainder contains "m", "maj", "min", "dim", "aug", "sus", "7", "9", etc.,
-		// we’ll assume it's a chord type and use octave 7
-		const std::string tail = core.substr(i);
-		bool looksLikeChord = false;
-		{
-			static const std::regex chordish(R"((maj|min|dim|aug|sus|add|m|M)?[0-9]*)", std::regex::icase);
-			looksLikeChord = std::regex_search(tail, chordish);
-		}
-
-		// choose octave: 7 for chord-like names, otherwise defaultOctave (4)
-		int octave = looksLikeChord ? 7 : defaultOctave;
-
+		// Determine octave based on chord-like names or use default
+		int octave = defaultOctave;
 		std::string out = root + std::to_string(octave);
 		if (!velSuffix.empty()) {
-			out += "-";
-			out += velSuffix;
+			out += "-" + velSuffix;
 		}
+
 		return out;
 	}
 
