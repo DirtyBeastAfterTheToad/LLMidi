@@ -2,12 +2,12 @@
 
 #include <JuceHeader.h>
 #include "PluginProcessor.h"
-#include "StatusDot.h"
-#include "AnimatedProgressBar.h"
+#include "OnlinePage.h"
+#include "OfflinePage.h"
 
 class LLMidiAudioProcessorEditor final
-	: public juce::AudioProcessorEditor
-	, private juce::Timer
+	: public juce::AudioProcessorEditor,
+	private juce::Timer
 {
 public:
 	explicit LLMidiAudioProcessorEditor(LLMidiAudioProcessor& processor);
@@ -15,91 +15,56 @@ public:
 
 	void paint(juce::Graphics& g) override;
 	void resized() override;
+	void visibilityChanged() override;
 
 private:
 	// Timer (poll background log + status)
 	void timerCallback() override;
 
-	// --- UI setup helpers ---
-	void setupUi();
-	void setupButtons();
-	void setupEditors();
-
-	// --- Event handlers ---
+	// --- Event handlers (wired to OfflinePage) ---
 	void onClickLoadModel();
 	void onClickCopyLog();
 	void onClickGenerate();
 	void onClickToggleLogs();
-	// --- Utilities ---
+	void onClickStop();
+	void onClickReroll();
+
+	// --- Internal UI logic ---
+	void syncUiFromProcessorOnce();
+	void updateWindowSizeForLogs();
 	void updateLogView();
 	void appendUiLogLine(const juce::String& line);
 	int  readSeedOrRandom() const;
 	void updateModelUi();
 	void updateGenProgress();
+	void saveUiMemoryToProcessor();
+	void loadUiMemoryFromProcessor();
 
-	// --- Layout helpers ---
-	struct Ui
-	{
-		static constexpr int windowW = 500;
-		static constexpr int windowH = 330;
-		static constexpr int logsExtraH = 220;
-
-		static constexpr int pad = 10;
-		static constexpr int rowGap = 6;
-		static constexpr int titleH = 24;
-		static constexpr int buttonRowH = 30;
-		static constexpr int seedRowH = 24;
-		static constexpr int promptLblH = 18;
-		static constexpr int promptH = 60;
-		static constexpr int logToggleRowH = 26;
-		static constexpr int seedLabelW = 40;
-		static constexpr int seedEditW = 100;
-		static constexpr int modelRowH = 20;
-		static constexpr int genRowH = 26;
-		static constexpr int seedRerollW = 70;
-	};
-
-private:
-	void onClickStop();
-	void updateWindowSizeForLogs();
-	void onClickReroll();
-	// Processor reference
+	// --- Processor reference ---
 	LLMidiAudioProcessor& audioProcessor;
 
-	// Controls
-	juce::TextButton loadButton{ "Load Model..." };
-	juce::TextButton copyButton{ "Copy Log" };
-	juce::TextButton genButton{ "Generate Pattern" };
-	// Model row
-	juce::Label modelLabel{ "modelLabel", "Model:" };
-	juce::Label modelName;
-	StatusDot modelDot;
-	juce::Label modelLoading{ "modelLoading", "Loading..." };
-	juce::TextButton logToggleButton{ "Show Logs" };
-	// Progress row for generation
-	double genProgress = 0.0;
-	AnimatedProgressBar genProgressBar;
-	juce::Label genStageLabel{ "genStage", "" };
+	// --- Tabbed layout ---
+	juce::TabbedComponent tabs{ juce::TabbedButtonBar::TabsAtTop };
+	std::unique_ptr<OfflinePage> offlinePage;
+	std::unique_ptr<OnlinePage>  onlinePage;
 
-	juce::TextButton stopButton{ "Stop" };
-
-	juce::Label      seedLabel{ "seedLabel",   "Seed:" };
-	juce::TextEditor seedEditor;
-	juce::TextButton rerollButton{ "Reroll" }; // NEW
-
-	juce::Label      promptLabel{ "promptLabel", "Prompt:" };
-	juce::TextEditor promptEditor;
-
-	juce::TextEditor logEditor;
+	// --- State ---
 	bool logsVisible = false;
 	bool modelLoadingFlag = false;
 	bool generationActive = false;
 	bool canceledThisRun = false;
-	// Async file chooser for model
+	juce::String lastRenderedLog;
+
+	// Remember tab & visibility across wrapper settings dialog
+	int  lastSelectedTabIndex = 0;
+	bool wasVisible = false;
+
 	std::unique_ptr<juce::FileChooser> modelChooser;
 
-	// Small cache to avoid rewriting the log editor every tick
-	juce::String lastRenderedLog;
+	// window sizing
+	static constexpr int kWindowW = 600;
+	static constexpr int kBaseH = 500; // tabbed layout height
+	static constexpr int kLogsExtraH = 220;
 
 	JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LLMidiAudioProcessorEditor)
 };

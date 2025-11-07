@@ -1,6 +1,9 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "LlamaRunner.h"
+#include "LlmSequenceParser.h"
+#include "SequenceValidator.h"
+#include "SequenceModel.h"
 #include <unordered_set>
 namespace
 {
@@ -80,6 +83,70 @@ void LLMidiAudioProcessor::scheduleNowAtCurrentBar(const juce::AudioPlayHead::Cu
 	haveSchedule = true;
 }
 
+bool LLMidiAudioProcessor::importManualJson(const std::string& jsonText, juce::String& errorOut)
+{
+	ParsedPhrase parsed;
+	std::string parseErr;
+
+	if (!parseEventJson(jsonText, /*defaultVelocity*/ 100, parseErr, parsed))
+	{
+		errorOut = "Parse error: " + juce::String(parseErr);
+		return false;
+	}
+
+	Sequence seq;
+	seq.bars = parsed.barsCount();
+	seq.stepsPerBar = parsed.stepsPerBar();
+	seq.midiChannel = 0;
+	seq.bpm = 120;
+	seq.data.clear();
+
+	seq.data.resize(seq.bars);
+	for (int b = 0; b < seq.bars; ++b)
+	{
+		seq.data[b].steps.resize(seq.stepsPerBar);
+
+		for (int s = 0; s < seq.stepsPerBar; ++s)
+		{
+			const auto& step = parsed.bars[(size_t)b][(size_t)s];
+			Step outStep;
+
+			switch (step.kind)
+			{
+			case StepEvent::Kind::Rest:
+				outStep = Step::makeRest();
+				break;
+			case StepEvent::Kind::Sustain:
+				outStep = Step::makeSustain();
+				break;
+			case StepEvent::Kind::Notes:
+			{
+				std::vector<Note> ns;
+				ns.reserve(step.notes.size());
+				for (const auto& n : step.notes)
+					ns.push_back({ n.midi, static_cast<uint8_t>(n.velocity) });
+				outStep = Step::makeChord(std::move(ns));
+				break;
+			}
+			}
+
+			seq.data[b].steps[s] = std::move(outStep);
+		}
+	}
+
+	if (seq.isEmpty())
+	{
+		errorOut = "Sequence has no data.";
+		return false;
+	}
+
+	sequence = seq;
+	haveSchedule = false;
+	lastBurnCandidate = sequence;
+	errorOut.clear();
+
+	return true;
+}
 void LLMidiAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
 	juce::ScopedNoDenormals noDenormals;
@@ -291,12 +358,6 @@ void LLMidiAudioProcessor::cancelLlmGeneration()
 	generator.requestCancelGeneration();
 }
 
-void LLMidiAudioProcessorEditor::onClickReroll()
-{
-	seedEditor.setText("-1", juce::dontSendNotification);
-	audioProcessor.setLastSeed(-1);
-	appendUiLogLine("[UI] Seed reset to -1 (reroll).");
-}
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {

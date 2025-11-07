@@ -10,6 +10,19 @@
 
 class LLMidiAudioProcessor final : public juce::AudioProcessor
 {
+	struct UiMemory
+	{
+		int selectedTab = 0;
+
+		juce::String onlinePrompt = "Piano melody on E minor";
+		juce::String onlineResponse;
+		juce::String onlineStatusText;
+		juce::Colour onlineStatusColour = juce::Colours::transparentBlack;
+		bool         onlineCopyGlow = true;
+		bool         onlineToMidiGlow = false;
+		bool         onlinePromptErrorGlow = false;
+		bool         onlineHasCopiedPrompt = false;
+	};
 public:
 	LLMidiAudioProcessor();
 	~LLMidiAudioProcessor() override;
@@ -21,6 +34,7 @@ public:
 	bool isBusesLayoutSupported(const BusesLayout& layouts) const override;
 #endif
 	void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+	bool importManualJson(const std::string& jsonText, juce::String& errorOut);
 
 	// Editor
 	juce::AudioProcessorEditor* createEditor() override;
@@ -69,6 +83,8 @@ public:
 	bool        hasBurnCandidate()    const { return lastBurnCandidate.bars > 0; }
 	void clearLlmLog();
 	void cancelLlmGeneration();
+	const UiMemory& getUiMemory() const { return uiMem; }
+	UiMemory& getUiMemory() { return uiMem; }
 private:
 	// --- Helpers ---
 	bool getHostPosition(juce::AudioPlayHead::CurrentPositionInfo& info) const;
@@ -108,6 +124,7 @@ private:
 	bool wasPlaying = false;
 
 	// Editor helpers
+	UiMemory uiMem;
 	int lastSeed = -1;
 	Sequence lastBurnCandidate;
 	JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LLMidiAudioProcessor)

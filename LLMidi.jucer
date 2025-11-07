@@ -10,6 +10,10 @@
     <GROUP id="{131EB84D-D752-C857-E823-22F769301A1E}" name="UI">
       <FILE id="kh6ciF" name="AnimatedProgressBar.h" compile="0" resource="0"
             file="Source/AnimatedProgressBar.h"/>
+      <FILE id="GC3yto" name="OfflinePage.cpp" compile="1" resource="0" file="Source/OfflinePage.cpp"/>
+      <FILE id="beBZSy" name="OfflinePage.h" compile="0" resource="0" file="Source/OfflinePage.h"/>
+      <FILE id="QELQEK" name="OnlinePage.cpp" compile="1" resource="0" file="Source/OnlinePage.cpp"/>
+      <FILE id="JlGzg6" name="OnlinePage.h" compile="0" resource="0" file="Source/OnlinePage.h"/>
       <FILE id="DPC8Dw" name="StatusDot.h" compile="0" resource="0" file="Source/StatusDot.h"/>
     </GROUP>
     <GROUP id="{6FC6456B-2AAE-36B4-2ED9-24588A207D63}" name="LLM">

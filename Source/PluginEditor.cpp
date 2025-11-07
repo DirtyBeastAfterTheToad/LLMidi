@@ -1,313 +1,372 @@
 #include "PluginEditor.h"
 #include "PluginProcessor.h"
 
+// ===================== Constructor / Destructor =====================
 LLMidiAudioProcessorEditor::LLMidiAudioProcessorEditor(LLMidiAudioProcessor& p)
-	: AudioProcessorEditor(&p)
-	, audioProcessor(p)
+	: AudioProcessorEditor(&p), audioProcessor(p)
 {
-	updateWindowSizeForLogs();
-	setupUi();
-	startTimerHz(10);
+	addAndMakeVisible(tabs);
+	tabs.addTab("Offline", juce::Colours::darkgrey, new OfflinePage(), true);
+	tabs.addTab("Online", juce::Colours::darkgrey, new OnlinePage(), true);
+
+	offlinePage.reset(dynamic_cast<OfflinePage*>(tabs.getTabContentComponent(0)));
+	onlinePage.reset(dynamic_cast<OnlinePage*>(tabs.getTabContentComponent(1)));
+
+	if (offlinePage)
+	{
+		offlinePage->onLoadModel = [this] { onClickLoadModel(); };
+		offlinePage->onGenerate = [this] { onClickGenerate(); };
+		offlinePage->onCopyLog = [this] { onClickCopyLog(); };
+		offlinePage->onToggleLogs = [this] { onClickToggleLogs(); };
+		offlinePage->onStop = [this] { onClickStop(); };
+		offlinePage->onReroll = [this] { onClickReroll(); };
+	}
+
+	if (onlinePage)
+	{
+		onlinePage->onCopyPromptSucceeded = [this]
+			{
+				auto& mem = audioProcessor.getUiMemory();
+				mem.onlineHasCopiedPrompt = true;
+				saveUiMemoryToProcessor();
+			};
+		onlinePage->onResponseEdited = [this]
+			{
+				auto& mem = audioProcessor.getUiMemory();
+				mem.onlineResponse = onlinePage->getResponseText();
+				saveUiMemoryToProcessor();
+			};
+		onlinePage->onConvertToMidi = [this](const juce::String& text)
+			{
+				juce::String err;
+				if (audioProcessor.importManualJson(text.toStdString(), err))
+				{
+					onlinePage->showStatus("Imported successfully!", juce::Colours::limegreen);
+					onlinePage->setToMidiGlow(false);
+
+					auto& mem = audioProcessor.getUiMemory();
+					mem.onlineStatusText = "Imported successfully!";
+					mem.onlineToMidiGlow = false;
+					saveUiMemoryToProcessor();
+				}
+				else
+				{
+					onlinePage->showStatus("Error " + err, juce::Colours::orangered);
+					auto& mem = audioProcessor.getUiMemory();
+					mem.onlineStatusText = "Error " + err;
+					saveUiMemoryToProcessor();
+				}
+			};
+		onlinePage->onPromptEdited = [this]
+			{
+				auto& mem = audioProcessor.getUiMemory();
+				mem.onlineHasCopiedPrompt = false;
+				mem.onlineCopyGlow = true;
+				mem.onlineToMidiGlow = false;
+				mem.onlinePrompt = onlinePage->getPromptText();
+				saveUiMemoryToProcessor();
+			};
+
+	}
+
+	setSize(kWindowW, kBaseH);
+
+	// Default hidden logs + progress & stop controls
+	logsVisible = false;
+	if (offlinePage)
+	{
+		offlinePage->setLogsVisible(false);
+		offlinePage->setProgressVisible(false);
+		offlinePage->setStopVisible(false);
+
+		const int restoredSeed = audioProcessor.getLastSeed();
+		offlinePage->getSeedEditor().setText(restoredSeed < 0 ? "-1" : juce::String(restoredSeed),
+			juce::dontSendNotification);
+		offlinePage->getPromptEditor().setText("Piano melody on E minor", juce::dontSendNotification);
+		audioProcessor.setLastPrompt("Piano melody on E minor");
+
+		offlinePage->getSeedEditor().onTextChange = [this]
+			{
+				if (!offlinePage) return;
+				const juce::String t = offlinePage->getSeedEditor().getText().trim();
+				if (t.isEmpty() || t == "-1") { audioProcessor.setLastSeed(-1); return; }
+				int s = t.getIntValue(); if (s <= 0) s = std::abs(s) + 1;
+				audioProcessor.setLastSeed(s);
+			};
+	}
+
+	if (offlinePage)
+	{
+		if (!audioProcessor.isModelReady())
+		{
+			offlinePage->setLoadGlow(true);
+			offlinePage->setGenerateGlow(false);
+		}
+		else
+		{
+			offlinePage->setLoadGlow(false);
+			offlinePage->setGenerateGlow(true);
+		}
+	}
+	if (onlinePage)
+	{
+		loadUiMemoryFromProcessor();
+	}
+
+	syncUiFromProcessorOnce();
+
+	lastSelectedTabIndex = tabs.getCurrentTabIndex();
+	wasVisible = isVisible();
+
+	startTimerHz(15);
 }
 
-LLMidiAudioProcessorEditor::~LLMidiAudioProcessorEditor()
-{
-}
-void LLMidiAudioProcessorEditor::updateWindowSizeForLogs()
-{
-	const int targetH = Ui::windowH + (logsVisible ? Ui::logsExtraH : 0);
-	setSize(Ui::windowW, targetH);
-}
+LLMidiAudioProcessorEditor::~LLMidiAudioProcessorEditor() {}
 
+// ===================== Painting / Resizing =====================
 void LLMidiAudioProcessorEditor::paint(juce::Graphics& g)
 {
 	g.fillAll(getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId));
-	g.setFont(juce::FontOptions(16.0f));
-	g.setColour(juce::Colours::white);
-
-	auto header = getLocalBounds().removeFromTop(Ui::titleH);
-	g.drawFittedText("LLMidi", header, juce::Justification::centred, 1);
 }
 
 void LLMidiAudioProcessorEditor::resized()
 {
-	auto r = getLocalBounds().reduced(Ui::pad);
-
-	r.removeFromTop(Ui::titleH + Ui::rowGap);
-
-	// Row 1: main actions
-	{
-		auto row = r.removeFromTop(Ui::buttonRowH);
-		auto eachW = row.getWidth() / 2;
-		loadButton.setBounds(row.removeFromLeft(eachW).reduced(2));
-		genButton.setBounds(row.removeFromLeft(eachW).reduced(2));
-	}
-
-	r.removeFromTop(Ui::rowGap);
-
-	// Row 2: model status (dot + name + optional "Loading...")
-	{
-		auto row = r.removeFromTop(Ui::modelRowH);
-		modelLabel.setBounds(row.removeFromLeft(50));
-		modelDot.setBounds(row.removeFromLeft(16));
-		modelName.setBounds(row.removeFromLeft(juce::jmax(120, row.getWidth() / 2)));
-		modelLoading.setBounds(row.removeFromLeft(100));
-	}
-
-	r.removeFromTop(Ui::rowGap);
-
-	// Row 3: Seed
-	{
-		auto row = r.removeFromTop(Ui::seedRowH);
-		seedLabel.setBounds(row.removeFromLeft(Ui::seedLabelW));
-		seedEditor.setBounds(row.removeFromLeft(Ui::seedEditW));
-		row.removeFromLeft(6);
-		rerollButton.setBounds(row.removeFromLeft(Ui::seedRerollW));
-	}
-
-	r.removeFromTop(Ui::rowGap);
-
-	// Row 4: Generation progress
-	{
-		auto row = r.removeFromTop(Ui::genRowH);
-
-		constexpr int stopW = 70;
-		constexpr int labelW = 180;
-		auto stopArea = row.removeFromRight(stopW);
-		auto labelArea = row.removeFromRight(labelW);
-		auto barArea = row;
-
-		genProgressBar.setBounds(barArea.reduced(2));
-		genStageLabel.setBounds(labelArea.reduced(2));
-		stopButton.setBounds(stopArea.reduced(2));
-	}
-
-	r.removeFromTop(Ui::rowGap);
-
-	// Row 5: Prompt label
-	{
-		auto row = r.removeFromTop(Ui::promptLblH);
-		promptLabel.setBounds(row.removeFromLeft(60));
-	}
-
-	// Row 6: Prompt box
-	{
-		auto row = r.removeFromTop(Ui::promptH);
-		promptEditor.setBounds(row.reduced(0, 2));
-	}
-
-	r.removeFromTop(Ui::rowGap + 4);
-
-	// Bottom row: log toggle + copy (copy only visible with logs)
-	auto bottomRow = r.removeFromBottom(Ui::logToggleRowH);
-	{
-		auto toggleW = 110;
-		logToggleButton.setBounds(bottomRow.removeFromLeft(toggleW).reduced(2));
-		auto copyW = 100;
-		copyButton.setBounds(bottomRow.removeFromLeft(copyW).reduced(2));
-	}
-
-	// Center area: log
-	if (logsVisible)
-	{
-		logEditor.setVisible(true);
-		copyButton.setVisible(true);
-		logToggleButton.setButtonText("Hide Logs");
-		logEditor.setBounds(r);
-	}
-	else
-	{
-		logEditor.setVisible(false);
-		copyButton.setVisible(false);
-		logToggleButton.setButtonText("Show Logs");
-	}
+	tabs.setBounds(getLocalBounds());
 }
 
+void LLMidiAudioProcessorEditor::visibilityChanged()
+{
+	if (wasVisible && !isVisible())
+	{
+		// going hidden -> save everything
+		saveUiMemoryToProcessor();
+	}
+	else if (!wasVisible && isVisible())
+	{
+		// becoming visible again -> restore everything
+		loadUiMemoryFromProcessor();
+		syncUiFromProcessorOnce();
+	}
+	wasVisible = isVisible();
+}
 
-
+// ===================== Timer / Sync =====================
 void LLMidiAudioProcessorEditor::timerCallback()
 {
+	lastSelectedTabIndex = tabs.getCurrentTabIndex();
+	saveUiMemoryToProcessor();
 	updateModelUi();
 	updateGenProgress();
 	updateLogView();
 }
 
-void LLMidiAudioProcessorEditor::setupUi()
+void LLMidiAudioProcessorEditor::syncUiFromProcessorOnce()
 {
-	setupButtons();
-	setupEditors();
+	if (!offlinePage) return;
 
-	juce::String intro;
-	intro << "LLMidi\n"
-		<< (audioProcessor.isModelReady() ? "Model ready.\n\n" : "No model loaded yet.\n\n");
-	logEditor.setText(intro, juce::dontSendNotification);
-	lastRenderedLog = logEditor.getText();
-}
+	offlinePage->setLogsVisible(logsVisible);
 
-void LLMidiAudioProcessorEditor::setupButtons()
-{
-	addAndMakeVisible(loadButton);
-	loadButton.onClick = [this] { onClickLoadModel(); };
+	const juce::String bgLog = audioProcessor.getLlmLog();
+	const bool done = bgLog.containsIgnoreCase("sequence ready");
+	const bool midPrompt = bgLog.lastIndexOf("Prompt [") >= 0;
+	const bool midGen = bgLog.lastIndexOf("Gen [") >= 0;
 
-	addAndMakeVisible(copyButton);
-	copyButton.onClick = [this] { onClickCopyLog(); };
-	copyButton.setVisible(false);
-
-	addAndMakeVisible(genButton);
-	genButton.onClick = [this] { onClickGenerate(); };
-
-	addAndMakeVisible(logToggleButton);
-	logToggleButton.onClick = [this] { onClickToggleLogs(); };
-
-	addAndMakeVisible(stopButton);
-	stopButton.onClick = [this] { onClickStop(); };
-	stopButton.setVisible(false);
-
-	addAndMakeVisible(rerollButton);
-	rerollButton.setTooltip("Set seed to -1 (random each run)");
-	rerollButton.onClick = [this] { onClickReroll(); };
-}
-
-void LLMidiAudioProcessorEditor::setupEditors()
-{
-	// Log
-	addAndMakeVisible(logEditor);
-	logEditor.setMultiLine(true);
-	logEditor.setReadOnly(true);
-	logEditor.setScrollbarsShown(true);
-	logEditor.setCaretVisible(false);
-	logEditor.setPopupMenuEnabled(true);
-	logEditor.setFont(juce::FontOptions(14.0f));
-	logEditor.setColour(juce::TextEditor::backgroundColourId, juce::Colours::black);
-	logEditor.setColour(juce::TextEditor::textColourId, juce::Colours::white);
-	logEditor.setColour(juce::TextEditor::outlineColourId, juce::Colours::darkgrey);
-	logEditor.setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::yellow.withAlpha(0.4f));
-	logEditor.setScrollToShowCursor(false);
-	logEditor.setVisible(false);
-
-	// Seed
-	addAndMakeVisible(seedLabel);
-	seedLabel.setColour(juce::Label::textColourId, juce::Colours::white);
-	seedLabel.setFont(juce::FontOptions(14.0f));
-
-	addAndMakeVisible(seedEditor);
-	seedEditor.setMultiLine(false);
-	seedEditor.setInputRestrictions(16, "0123456789-"); // allow '-' so user can type -1
-	const int restoredSeed = audioProcessor.getLastSeed();
-	seedEditor.setText(restoredSeed < 0 ? "-1" : juce::String(restoredSeed),
-		juce::dontSendNotification);
-	seedEditor.setColour(juce::TextEditor::backgroundColourId, juce::Colours::black);
-	seedEditor.setColour(juce::TextEditor::textColourId, juce::Colours::white);
-	seedEditor.setColour(juce::TextEditor::outlineColourId, juce::Colours::darkgrey);
-	seedEditor.setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::yellow.withAlpha(0.4f));
-	seedEditor.setFont(juce::FontOptions(14.0f));
-
-	// Prompt
-	addAndMakeVisible(promptLabel);
-	promptLabel.setColour(juce::Label::textColourId, juce::Colours::white);
-	promptLabel.setFont(juce::FontOptions(14.0f));
-
-	addAndMakeVisible(promptEditor);
-	promptEditor.setMultiLine(true);
-	promptEditor.setReturnKeyStartsNewLine(true);
-	promptEditor.setScrollbarsShown(true);
-	promptEditor.setCaretVisible(true);
-	promptEditor.setPopupMenuEnabled(true);
-
-	promptEditor.setTextToShowWhenEmpty("Piano melody on E minor", juce::Colours::grey);
-	promptEditor.setText(audioProcessor.getLastPrompt(), juce::dontSendNotification);
-
-	promptEditor.setColour(juce::TextEditor::backgroundColourId, juce::Colours::black);
-	promptEditor.setColour(juce::TextEditor::textColourId, juce::Colours::white);
-	promptEditor.setColour(juce::TextEditor::outlineColourId, juce::Colours::darkgrey);
-	promptEditor.setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::yellow.withAlpha(0.4f));
-	promptEditor.setFont(juce::FontOptions(14.0f));
-
-	//  Model row
-	addAndMakeVisible(modelLabel);
-	modelLabel.setColour(juce::Label::textColourId, juce::Colours::white);
-	modelLabel.setFont(juce::FontOptions(13.0f));
-
-	addAndMakeVisible(modelDot);
-	modelDot.setColour(juce::Colours::red);
-
-	addAndMakeVisible(modelName);
-	modelName.setText({}, juce::dontSendNotification);
-	modelName.setColour(juce::Label::textColourId, juce::Colours::white);
-	modelName.setFont(juce::FontOptions(13.0f));
-
-	addAndMakeVisible(modelLoading);
-	modelLoading.setColour(juce::Label::textColourId, juce::Colours::yellow);
-	modelLoading.setFont(juce::FontOptions(13.0f));
-	modelLoading.setVisible(false);
-
-	//  Generation progress row
-	addAndMakeVisible(genProgressBar);
-	genProgressBar.setVisible(false);
-	genProgressBar.setProgress(0.0);
-
-	addAndMakeVisible(genStageLabel);
-	genStageLabel.setColour(juce::Label::textColourId, juce::Colours::white);
-	genStageLabel.setFont(juce::FontOptions(13.0f));
-	genStageLabel.setMinimumHorizontalScale(0.8f);
-	genStageLabel.setText("", juce::dontSendNotification);
-	genStageLabel.setVisible(false);
-
-	const bool hasCandidate = audioProcessor.hasBurnCandidate();
-	const juce::String logNow = hasCandidate ? audioProcessor.getLlmLog() : juce::String();
-	const bool logSaysReady = hasCandidate && logNow.containsIgnoreCase("sequence ready");
-
-	if (hasCandidate && logSaysReady)
+	if (done)
 	{
-		genProgress = 1.0;
-		genProgressBar.setProgress(1.0);
-		genProgressBar.setActive(false);
-		genProgressBar.setVisible(true);
-		genStageLabel.setVisible(true);
-		genStageLabel.setText("Ready to burn!", juce::dontSendNotification);
-
-		stopButton.setVisible(false);
-		stopButton.setEnabled(false);
+		offlinePage->setProgressVisible(true);
+		offlinePage->getProgressBar().setProgress(1.0);
+		offlinePage->getProgressBar().setActive(false);
+		offlinePage->setStageText("Ready to burn!", juce::Colours::white);
+		offlinePage->setStopVisible(false);
+		offlinePage->setGenerateGlow(false);
+		generationActive = false;
+		canceledThisRun = false;
+	}
+	else if (midPrompt || midGen)
+	{
+		offlinePage->setProgressVisible(true);
+		offlinePage->getProgressBar().setActive(true);
+		offlinePage->setStageText(midPrompt ? "Ingesting prompt..." : "Generating the pattern...", juce::Colours::white);
+		offlinePage->setStopVisible(true);
+		offlinePage->setGenerateGlow(false);
+		generationActive = true;
+		canceledThisRun = false;
 	}
 	else
 	{
-		genProgress = 0.0;
-		genProgressBar.setProgress(0.0);
-		genProgressBar.setActive(false);
-		genProgressBar.setVisible(false);
-		genStageLabel.setVisible(false);
-		genStageLabel.setText("", juce::dontSendNotification);
+		offlinePage->setProgressVisible(false);
+		offlinePage->setStopVisible(false);
+		generationActive = false;
 
-		const bool midPrompt = logNow.lastIndexOf("Prompt [") >= 0;
-		const bool midGen = logNow.lastIndexOf("Gen [") >= 0;
-		const bool done = logNow.containsIgnoreCase("sequence ready");
-
-		if ((midPrompt || midGen) && !done)
+		if (audioProcessor.isModelReady())
 		{
-			generationActive = true;
-			genProgressBar.setVisible(true);
-			genStageLabel.setVisible(true);
-			genProgressBar.setActive(true);
-			genStageLabel.setText(midPrompt ? "Ingesting prompt..." : "Generating the pattern...",
-				juce::dontSendNotification);
-
-			stopButton.setVisible(true);
-			stopButton.setEnabled(true);
+			offlinePage->setLoadGlow(false);
+			offlinePage->setGenerateGlow(true);
 		}
 		else
 		{
-			stopButton.setVisible(false);
-			stopButton.setEnabled(false);
+			offlinePage->setLoadGlow(true);
+			offlinePage->setGenerateGlow(false);
 		}
 	}
 }
 
+void LLMidiAudioProcessorEditor::updateWindowSizeForLogs()
+{
+	setSize(kWindowW, logsVisible ? (kBaseH + kLogsExtraH) : kBaseH);
+}
 
+void LLMidiAudioProcessorEditor::updateModelUi()
+{
+	if (!offlinePage) return;
+
+	const bool ready = audioProcessor.isModelReady();
+	auto& dot = offlinePage->getModelDot();
+	auto& nameLbl = offlinePage->getModelNameLabel();
+	auto& loading = offlinePage->getModelLoadingLabel();
+
+	if (ready)
+	{
+		dot.setColour(juce::Colours::limegreen);
+		nameLbl.setText(juce::File(audioProcessor.getLoadedModelPath()).getFileName(), juce::dontSendNotification);
+		modelLoadingFlag = false;
+		loading.setVisible(false);
+
+		offlinePage->setLoadGlow(false);
+		offlinePage->setGenerateGlow(true);
+	}
+	else
+	{
+		dot.setColour(juce::Colours::red);
+		if (modelLoadingFlag) loading.setVisible(true);
+
+		offlinePage->setLoadGlow(true);
+		offlinePage->setGenerateGlow(false);
+	}
+}
+
+void LLMidiAudioProcessorEditor::updateGenProgress()
+{
+	if (!offlinePage) return;
+
+	auto& bar = offlinePage->getProgressBar();
+	auto& label = offlinePage->getStageLabel();
+
+	const juce::String bgLog = audioProcessor.getLlmLog();
+
+	if (canceledThisRun)
+	{
+		bar.setActive(false);
+		return;
+	}
+
+	const bool hasParseErr = bgLog.containsIgnoreCase("parse error") ||
+		bgLog.containsIgnoreCase("salvage also failed");
+	const bool hasEmptyPhrase = bgLog.containsIgnoreCase("pattern gen: empty phrase after parse");
+	const bool hasEmptyRaw = bgLog.containsIgnoreCase("pattern gen failed: empty raw output");
+	const bool hasLlmErr = bgLog.containsIgnoreCase("llm error:");
+	const bool decodeFail = bgLog.containsIgnoreCase("stop reason: decode_fail");
+	const bool anyErr = hasParseErr || hasEmptyPhrase || hasEmptyRaw || hasLlmErr || decodeFail;
+
+	if (anyErr)
+	{
+		generationActive = false;
+		offlinePage->setProgressVisible(false);
+		offlinePage->setStageText("Generation failed - check log.", juce::Colours::orangered);
+		offlinePage->setStopVisible(false);
+		offlinePage->setGenerateGlow(true);
+		return;
+	}
+
+	const int  lastPrompt = bgLog.lastIndexOf("Prompt [");
+	const int  lastGen = bgLog.lastIndexOf("Gen [");
+	const int  useIdx = juce::jmax(lastPrompt, lastGen);
+	const bool done = bgLog.containsIgnoreCase("sequence ready");
+
+	if (done)
+	{
+		bar.setProgress(1.0);
+		bar.setActive(false);
+		offlinePage->setStageText("Ready to burn!", juce::Colours::white);
+		offlinePage->setStopVisible(false);
+		offlinePage->setGenerateGlow(false);
+		generationActive = false;
+		return;
+	}
+
+	if (!generationActive)
+	{
+		if (useIdx >= 0)
+		{
+			generationActive = true;
+			offlinePage->setProgressVisible(true);
+			bar.setActive(true);
+			offlinePage->setStopVisible(true);
+			offlinePage->setGenerateGlow(false);
+		}
+		else
+		{
+			bar.setActive(false);
+			return;
+		}
+	}
+
+	// Update progress %
+	if (useIdx >= 0)
+	{
+		const auto tail = bgLog.substring(useIdx);
+		const int  open = tail.lastIndexOfChar('(');
+		const int  close = tail.lastIndexOfChar(')');
+		if (open >= 0 && close > open)
+		{
+			const auto percentStr = tail.substring(open + 1, close).removeCharacters("% ").trim();
+			const int pct = percentStr.getIntValue();
+			bar.setProgress(juce::jlimit(0, 100, pct) / 100.0);
+		}
+
+		offlinePage->setStageText(
+			(useIdx == lastPrompt) ? "Ingesting prompt..." : "Generating the pattern...",
+			juce::Colours::white
+		);
+		bar.setActive(true);
+	}
+}
+
+void LLMidiAudioProcessorEditor::updateLogView()
+{
+	if (!offlinePage || !offlinePage->areLogsVisible())
+		return;
+
+	auto& le = offlinePage->getLogEditor();
+
+	juce::String statusTop = audioProcessor.isModelReady() ? "Model ready.\n" : "Model not ready.\n";
+	juce::String bgLog = audioProcessor.getLlmLog();
+
+	juce::String combined;
+	combined << statusTop
+		<< "\n--- Background log ---\n"
+		<< bgLog
+		<< "\n";
+
+	if (combined == lastRenderedLog)
+		return;
+
+	const bool userAtEnd = (le.getCaretPosition() >= le.getTotalNumChars() - 1);
+
+	le.setText(combined, juce::dontSendNotification);
+	if (userAtEnd)
+	{
+		le.moveCaretToEnd();
+		le.scrollEditorToPositionCaret(0, le.getCaretRectangle().getY());
+	}
+
+	lastRenderedLog = combined;
+}
+
+// ===================== Buttons =====================
 void LLMidiAudioProcessorEditor::onClickLoadModel()
 {
-	modelChooser = std::make_unique<juce::FileChooser>(
-		"Select a GGUF model", juce::File(), "*.gguf");
-
+	modelChooser = std::make_unique<juce::FileChooser>("Select a GGUF model", juce::File(), "*.gguf");
 	modelChooser->launchAsync(
 		juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
 		[this](const juce::FileChooser& chooser)
@@ -322,20 +381,36 @@ void LLMidiAudioProcessorEditor::onClickLoadModel()
 			appendUiLogLine("[UI] Loading model: " + file.getFullPathName());
 
 			modelLoadingFlag = true;
-			modelLoading.setVisible(true);
+			if (offlinePage) offlinePage->getModelLoadingLabel().setVisible(true);
+
+			if (offlinePage) offlinePage->setLoadGlow(false);
 		});
 }
 
 void LLMidiAudioProcessorEditor::onClickCopyLog()
 {
-	juce::SystemClipboard::copyTextToClipboard(logEditor.getText());
+	if (!offlinePage) return;
+	juce::SystemClipboard::copyTextToClipboard(offlinePage->getLogEditor().getText());
 	appendUiLogLine("[UI] Log copied to clipboard.");
 }
 
 void LLMidiAudioProcessorEditor::onClickGenerate()
 {
-	const std::string naturalPrompt = promptEditor.getText().toStdString();
-	audioProcessor.setLastPrompt(promptEditor.getText());
+	if (!offlinePage) return;
+
+	const juce::String promptText = offlinePage->getPromptEditor().getText().trim();
+	if (promptText.isEmpty())
+	{
+		offlinePage->setPromptErrorGlow(true);
+		offlinePage->setGenerateGlow(true);
+		return;
+	}
+
+	offlinePage->setPromptErrorGlow(false);
+	offlinePage->setGenerateGlow(false);
+
+	const std::string naturalPrompt = promptText.toStdString();
+	audioProcessor.setLastPrompt(promptText);
 
 	const int bars = 8;
 	const int stepsPerBar = 4;
@@ -346,209 +421,28 @@ void LLMidiAudioProcessorEditor::onClickGenerate()
 	audioProcessor.setLastSeed(seedToUse);
 	audioProcessor.clearLlmLog();
 	lastRenderedLog.clear();
-	logEditor.clear();
+	offlinePage->getLogEditor().clear();
 
-	audioProcessor.requestLlmGeneratePattern(
-		naturalPrompt, bars, stepsPerBar, defaultVel, channel, seedToUse);
+	audioProcessor.requestLlmGeneratePattern(naturalPrompt, bars, stepsPerBar, defaultVel, channel, seedToUse);
 
 	appendUiLogLine("[UI] Generate pattern requested with seed " + juce::String(seedToUse));
-
-	seedEditor.setText(juce::String(seedToUse), juce::dontSendNotification);
+	offlinePage->getSeedEditor().setText(juce::String(seedToUse), juce::dontSendNotification);
 
 	canceledThisRun = false;
 	generationActive = true;
-	genProgress = 0.0;
-	genProgressBar.setProgress(0.0);
-	genProgressBar.setActive(true);
-	genProgressBar.setVisible(true);
-	genStageLabel.setVisible(true);
-	genStageLabel.setText("Ingesting prompt...", juce::dontSendNotification);
-	genStageLabel.setColour(juce::Label::textColourId, juce::Colours::white);
 
-	stopButton.setVisible(true);
-	stopButton.setEnabled(true);
-
+	offlinePage->setProgressVisible(true);
+	offlinePage->getProgressBar().setProgress(0.0);
+	offlinePage->getProgressBar().setActive(true);
+	offlinePage->setStageText("Ingesting prompt...", juce::Colours::white);
+	offlinePage->setStopVisible(true);
 }
 
 void LLMidiAudioProcessorEditor::onClickToggleLogs()
 {
 	logsVisible = !logsVisible;
+	if (offlinePage) offlinePage->setLogsVisible(logsVisible);
 	updateWindowSizeForLogs();
-	resized();
-}
-void LLMidiAudioProcessorEditor::updateGenProgress()
-{
-	const juce::String bgLog = audioProcessor.getLlmLog();
-
-	// If user canceled this run, do not resurrect UI based on logs
-	if (canceledThisRun)
-	{
-		genProgressBar.setActive(false);
-		return;
-	}
-
-	// -------- Error detection (fail fast) ----------
-	const bool hasParseErr = bgLog.containsIgnoreCase("parse error")
-		|| bgLog.containsIgnoreCase("salvage also failed");
-	const bool hasEmptyPhrase = bgLog.containsIgnoreCase("pattern gen: empty phrase after parse");
-	const bool hasEmptyRaw = bgLog.containsIgnoreCase("pattern gen failed: empty raw output");
-	const bool hasLlmErr = bgLog.containsIgnoreCase("llm error:");
-	const bool decodeFail = bgLog.containsIgnoreCase("stop reason: decode_fail");
-
-	if (hasParseErr || hasEmptyPhrase || hasEmptyRaw || hasLlmErr || decodeFail)
-	{
-		generationActive = false;
-
-		genProgressBar.setActive(false);
-		genProgressBar.setVisible(false);
-
-		genStageLabel.setVisible(true);
-		genStageLabel.setText("Generation failed - check log.", juce::dontSendNotification);
-		genStageLabel.setColour(juce::Label::textColourId, juce::Colours::orangered);
-
-		stopButton.setVisible(false);
-		stopButton.setEnabled(false);
-		return;
-	}
-	if (!generationActive)
-	{
-		const bool midPrompt = bgLog.lastIndexOf("Prompt [") >= 0;
-		const bool midGen = bgLog.lastIndexOf("Gen [") >= 0;
-		const bool done = bgLog.containsIgnoreCase("sequence ready");
-
-		if ((midPrompt || midGen) && !done)
-		{
-			generationActive = true;
-			genProgressBar.setVisible(true);
-			genStageLabel.setVisible(true);
-			genProgressBar.setActive(true);
-
-			stopButton.setVisible(true);
-			stopButton.setEnabled(true);
-		}
-		else
-		{
-			genProgressBar.setActive(false);
-			return;
-		}
-	}
-
-	// Completion
-	if (bgLog.containsIgnoreCase("sequence ready"))
-	{
-		genProgress = 1.0;
-		genProgressBar.setProgress(1.0);
-		genProgressBar.setActive(false);
-		genStageLabel.setText("Ready to burn!", juce::dontSendNotification);
-		generationActive = false;
-
-		stopButton.setVisible(false);
-		stopButton.setEnabled(false);
-		return;
-	}
-
-	// Progress parsing
-	const int lastPrompt = bgLog.lastIndexOf("Prompt [");
-	const int lastGen = bgLog.lastIndexOf("Gen [");
-	const int useIdx = juce::jmax(lastPrompt, lastGen);
-
-	if (useIdx < 0)
-	{
-		genProgressBar.setActive(true);
-		return;
-	}
-
-	const auto tail = bgLog.substring(useIdx);
-	const int  open = tail.lastIndexOfChar('(');
-	const int  close = tail.lastIndexOfChar(')');
-
-	if (open >= 0 && close > open)
-	{
-		const auto percentStr = tail.substring(open + 1, close)
-			.removeCharacters("% ")
-			.trim();
-		const int pct = percentStr.getIntValue();
-		genProgress = juce::jlimit(0, 100, pct) / 100.0;
-		genProgressBar.setProgress(genProgress);
-	}
-
-	if (useIdx == lastPrompt)
-		genStageLabel.setText("Ingesting prompt...", juce::dontSendNotification);
-	else
-		genStageLabel.setText("Generating the pattern...", juce::dontSendNotification);
-
-	genProgressBar.setActive(true);
-}
-
-void LLMidiAudioProcessorEditor::updateModelUi()
-{
-	const bool ready = audioProcessor.isModelReady();
-	if (ready)
-	{
-		modelDot.setColour(juce::Colours::limegreen);
-		const auto path = audioProcessor.getLoadedModelPath();
-		const juce::String name = juce::File(path).getFileName();
-		modelName.setText(name, juce::dontSendNotification);
-		modelLoadingFlag = false;
-		modelLoading.setVisible(false);
-	}
-	else
-	{
-		modelDot.setColour(juce::Colours::red);
-		if (modelLoadingFlag)
-			modelLoading.setVisible(true);
-	}
-}
-
-void LLMidiAudioProcessorEditor::updateLogView()
-{
-	juce::String statusTop = audioProcessor.isModelReady() ? "Model ready.\n" : "Model not ready.\n";
-	juce::String bgLog = audioProcessor.getLlmLog();
-
-	juce::String combined;
-	combined << statusTop
-		<< "\n--- Background log ---\n"
-		<< bgLog
-		<< "\n";
-
-	if (combined == lastRenderedLog)
-		return;
-
-	const bool userAtEnd = (logEditor.getCaretPosition() >= logEditor.getTotalNumChars() - 1);
-
-	logEditor.setText(combined, juce::dontSendNotification);
-
-	if (userAtEnd)
-	{
-		logEditor.moveCaretToEnd();
-		logEditor.scrollEditorToPositionCaret(0, logEditor.getCaretRectangle().getY());
-	}
-
-	lastRenderedLog = combined;
-}
-
-void LLMidiAudioProcessorEditor::appendUiLogLine(const juce::String& line)
-{
-	logEditor.moveCaretToEnd();
-	logEditor.insertTextAtCaret(line + "\n");
-	lastRenderedLog = logEditor.getText();
-}
-
-int LLMidiAudioProcessorEditor::readSeedOrRandom() const
-{
-	// If empty or -1 => choose a positive random seed (avoid 0)
-	const juce::String text = seedEditor.getText().trim();
-	if (text.isEmpty() || text == "-1")
-	{
-		int s = juce::Random::getSystemRandom().nextInt();
-		if (s <= 0) s = std::abs(s) + 1;
-		return s;
-	}
-
-	// Otherwise parse int (invalid becomes 0 -> we guard by making it positive)
-	int s = text.getIntValue();
-	if (s <= 0) s = std::abs(s) + 1;
-	return s;
 }
 
 void LLMidiAudioProcessorEditor::onClickStop()
@@ -556,11 +450,85 @@ void LLMidiAudioProcessorEditor::onClickStop()
 	audioProcessor.cancelLlmGeneration();
 	canceledThisRun = true;
 	generationActive = false;
-	genProgressBar.setActive(false);
-	genProgressBar.setVisible(false);
-	genStageLabel.setText("Canceled", juce::dontSendNotification);
 
-	stopButton.setVisible(false);
-	stopButton.setEnabled(false);
+	if (offlinePage)
+	{
+		offlinePage->getProgressBar().setActive(false);
+		offlinePage->setProgressVisible(false);
+		offlinePage->setStageText("Canceled", juce::Colours::white);
+		offlinePage->setStopVisible(false);
+
+		offlinePage->setGenerateGlow(true);
+	}
+}
+
+void LLMidiAudioProcessorEditor::onClickReroll()
+{
+	if (!offlinePage) return;
+	offlinePage->getSeedEditor().setText("-1", juce::dontSendNotification);
+	audioProcessor.setLastSeed(-1);
+	appendUiLogLine("[UI] Seed reset to -1 (reroll).");
+}
+
+// ===================== Helpers =====================
+void LLMidiAudioProcessorEditor::appendUiLogLine(const juce::String& line)
+{
+	if (!offlinePage) return;
+	auto& le = offlinePage->getLogEditor();
+	le.moveCaretToEnd();
+	le.insertTextAtCaret(line + "\n");
+	lastRenderedLog = le.getText();
+}
+
+int LLMidiAudioProcessorEditor::readSeedOrRandom() const
+{
+	if (!offlinePage) return 1;
+	const juce::String text = offlinePage->getSeedEditor().getText().trim();
+	if (text.isEmpty() || text == "-1")
+	{
+		int s = juce::Random::getSystemRandom().nextInt();
+		if (s <= 0) s = std::abs(s) + 1;
+		return s;
+	}
+	int s = text.getIntValue();
+	if (s <= 0) s = std::abs(s) + 1;
+	return s;
+}
+void LLMidiAudioProcessorEditor::saveUiMemoryToProcessor()
+{
+	auto& mem = audioProcessor.getUiMemory();
+	mem.selectedTab = tabs.getCurrentTabIndex();
+
+	if (onlinePage)
+	{
+		mem.onlinePrompt = onlinePage->getPromptText();
+		mem.onlineResponse = onlinePage->getResponseText();
+		mem.onlineStatusText = onlinePage->getStatusText();
+		mem.onlineStatusColour = onlinePage->getStatusLabelColour();
+		mem.onlineCopyGlow = onlinePage->isCopyGlowOn();
+		mem.onlineToMidiGlow = onlinePage->isToMidiGlowOn();
+		mem.onlinePromptErrorGlow = onlinePage->isPromptErrorGlowOn();
+	}
+}
+
+void LLMidiAudioProcessorEditor::loadUiMemoryFromProcessor()
+{
+	const auto& mem = audioProcessor.getUiMemory();
+
+	tabs.setCurrentTabIndex(juce::jlimit(0, tabs.getNumTabs() - 1, mem.selectedTab));
+
+	if (onlinePage)
+	{
+		onlinePage->setPromptText(mem.onlinePrompt.isNotEmpty() ? mem.onlinePrompt : "Piano melody on E minor");
+		onlinePage->setResponseText(mem.onlineResponse);
+		if (mem.onlineStatusText.isNotEmpty())
+			onlinePage->setStatusText(mem.onlineStatusText,
+				mem.onlineStatusColour.isTransparent() ? juce::Colours::white
+				: mem.onlineStatusColour);
+
+		onlinePage->setPromptErrorGlow(mem.onlinePromptErrorGlow);
+		onlinePage->setCopyGlow(mem.onlineCopyGlow);
+		onlinePage->setToMidiGlow(mem.onlineToMidiGlow);
+	}
 }
 

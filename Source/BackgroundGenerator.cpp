@@ -108,7 +108,7 @@ namespace
 		size_t close = s.rfind("```");
 		if (close == std::string::npos || close <= open) return false;
 
-		size_t probe = open + 3; // after ```
+		size_t probe = open + 3;
 		size_t bracket = s.find('[', probe);
 		if (bracket != std::string::npos && bracket < close) {
 			size_t lastBracket = s.rfind(']', close - 1);
@@ -147,7 +147,7 @@ namespace
 		}
 	}
 
-} // namespace
+}
 
 BackgroundGenerator::BackgroundGenerator()
 	: juce::Thread("LLMidi-Generator")
@@ -453,39 +453,77 @@ std::string BackgroundGenerator::buildPrompt(bool isPhi,
 	int steps) const
 {
 	std::ostringstream rules;
+
 	rules
 		<< "You are a MIDI pattern generator.\n"
-		<< "Return ONLY one JSON object with this exact shape:\n"
-		<< "{\"b\":" << bars << ",\"s\":" << steps << ",\"e\":[ ... ]}\n"
-		<< "Event format: [startStep, noteOrNotes, durationSteps, velocity]\n"
-		<< "  - startStep: 0-based integer\n"
-		<< "  - noteOrNotes: \"C4\" or [\"C4\",\"E4-80\",\"G4\"]\n"
-		<< "  - durationSteps: positive integer\n"
-		<< "  - velocity: 1..127 (default for notes without -NN)\n"
-		<< "Rules:\n"
-		<< "  - No text before '{' and nothing after the final '}'.\n"
-		<< "  - In note fields, use note names only (e.g., \"C3\", \"G#4\").\n"
-		<< "    Do NOT write chord symbols like \"Cm7\".\n"
-		<< "  - COVER ALL BARS: for each bar k in 0.." << (bars - 1) << ", include AT LEAST\n"
-		<< "    ONE  EVENT whose startStep is in\n"
-		<< "    [k*" << steps << ", (k+1)*" << steps << " - 1].\n"
-		<< "  - If multiple notes BEGIN at the same step, put them in ONE event (a chord array).\n"
-		<< "  - Prefer musical variation: you may add single-note events as arpeggios."
-		<< "Indices reminder for b=" << bars << ", s=" << steps << ":\n"
-		<< "  bar0: steps 0.." << (steps - 1)
-		<< ", bar1: " << (steps) << ".." << (2 * steps - 1)
-		<< ", bar2: " << (2 * steps) << ".." << (3 * steps - 1)
-		<< ", bar3: " << (3 * steps) << ".." << (4 * steps - 1) << " etc.\n"
-		<< "Example:\n"
-		<< "{\"b\":8,\"s\":4,\"e\":[[0,[\"A#3\",\"D4\",\"F4\"],4,85],[4,[\"G3\",\"C4\",\"D#4\"],4,85],[8,[\"A#3\",\"D4\"],2,85],[9,\"F4\",1,72],[12,[\"G3\",\"C4\",\"D#4\"],4,85]]}\n"
-		<< "Style: " << user << "\n";
+		<< "Task: Generate a " << bars << "-bar musical pattern for the request: \"" << user << "\".\n"
+		<< "\n"
+		<< "Output REQUIREMENTS (must follow EXACTLY):\n"
+		<< "* Output ONLY a single JSON object. No prose, no markdown, no code fences, no prefix/suffix.\n"
+		<< "* JSON schema:\n"
+		<< "{\n"
+		<< "  \"b\": " << bars << ",\n"
+		<< "  \"s\": " << steps << ",               // integer: steps per bar\n"
+		<< "  \"e\": [                // array of events\n"
+		<< "    [startStep, noteOrNotes, durationSteps, velocity],\n"
+		<< "    ...\n"
+		<< "  ]\n"
+		<< "}\n"
+		<< "\n"
+		<< "Event format details:\n"
+		<< "* startStep: integer >= 0. The timeline is in steps, totalSteps = b * s.\n"
+		<< "* durationSteps: integer >= 1.\n"
+		<< "* velocity: integer 1..127 (typical 60..110).\n"
+		<< "* noteOrNotes: either a string note token (e.g., \"C4\", \"Bb3-90\", \"F#5\")\n"
+		<< "  or an array of note tokens for chords (e.g., [\"C4\",\"E4-88\",\"G4\"]).\n"
+		<< "  A note token may include an optional per-note velocity suffix \"-NN\" (1..127),\n"
+		<< "  which overrides the event velocity for that note.\n"
+		<< "\n"
+		<< "Rhythm & durations (important):\n"
+		<< "* Do NOT quantize everything to durationSteps=1.\n"
+		<< "* Use a VARIETY of durationSteps values (e.g., 1,2,3,4...).\n"
+		<< "* At least 50% of events MUST have durationSteps >= 2 (sustained notes/chords).\n"
+		<< "* Include some longer notes/chords that span across steps or even across bar boundaries when musical.\n"
+		<< "* If the style truly calls for staccato, you may use more 1-step notes, but still keep >=30% with durationSteps >= 2.\n"
+		<< "* Quick cheat sheet for s=" << steps << ": 1 = " << (steps == 4 ? "quarter" : "1/" + std::to_string(steps))
+		<< " note, 2 = longer sustain, etc.\n"
+		<< "\n"
+		<< "Mini example (for illustration only — your output must be a single JSON object without comments):\n"
+		<< "{\n"
+		<< "  \"b\": 8,\n"
+		<< "  \"s\": 4,\n"
+		<< "  \"e\": [\n"
+		<< "    [0,  \"C4\",        2, 96],\n"
+		<< "    [2,  [\"E4\",\"G4\"],3, 92],\n"
+		<< "    [8,  \"D4-88\",     4, 88],\n"
+		<< "    [16, [\"E4\",\"G4\"],2, 96],\n"
+		<< "    [22, \"B3\",        1, 90]\n"
+		<< "  ]\n"
+		<< "}\n"
+		<< "\n"
+		<< "Constraints and guidance:\n"
+		<< "* Use exactly b=" << bars << " bars. Use s=" << steps << ".\n"
+		<< "* Keep events within the total range (0 .. b*s-1). Overlap is allowed.\n"
+		<< "* Sort events in ascending startStep. Avoid zero/negative durations.\n"
+		<< "* Style should reflect the request (key, register, density, repetition/variation).\n"
+		<< "* Use varied durationSteps; at least half of the events must sustain (durationSteps >= 2).\n"
+		<< "* Avoid making all events durationSteps=1 unless the style explicitly demands strict staccato.\n"
+		<< "* COVER ALL BARS: for each bar k in 0.." << (bars - 1) << ", include AT LEAST ONE event with startStep in "
+		<< "[k*" << steps << ", (k+1)*" << steps << " - 1].\n"
+		<< "* If multiple notes BEGIN at the same step, put them in ONE event (a chord array).\n"
+		<< "\n"
+		<< "Important: Return ONLY the JSON object. Start with '{' and end with '}'.\n";
+
+	// Wrap for different model chat templates
 	std::ostringstream prompt;
-	if (isPhi) {
+	if (isPhi)
+	{
 		prompt << "<|user|>\n" << rules.str()
 			<< "<|end|>\n<|assistant|>";
 	}
-	else {
-		prompt << "<s>[INST] <<SYS>>" << rules.str() << "<</SYS>> [/INST]";
+	else
+	{
+		prompt << "<s>[INST] <<SYS>>\n" << rules.str() << "\n<</SYS>> [/INST]";
 	}
 	return prompt.str();
 }
@@ -559,7 +597,6 @@ void BackgroundGenerator::appendLog(const juce::String& line)
 
 	if (line.startsWith(kProgressPrefix))
 	{
-		// “Live” progress: replace the previous line
 		juce::String cleaned = line.fromFirstOccurrenceOf(kProgressPrefix, false, false);
 
 		if (logLines.isEmpty())
