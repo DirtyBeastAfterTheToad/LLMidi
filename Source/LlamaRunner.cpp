@@ -274,12 +274,6 @@ std::string LlamaRunner::generate(const std::string& prompt,
 	llama_sampler* chain =
 		build_sampler_chain(ip, seedUse, errorOut, onLog);
 
-	const llama_token eos_tok = llama_vocab_eos(vocab);
-	llama_logit_bias lb{ eos_tok, -10.0f };
-	llama_sampler* eosBlocker =
-		llama_sampler_init_logit_bias(llama_vocab_n_tokens(vocab), 1, &lb);
-	llama_sampler_chain_add(chain, eosBlocker);
-
 	// seed sampler with prompt
 	for (auto t : prompt_tokens)
 		llama_sampler_accept(chain, t);
@@ -294,11 +288,18 @@ std::string LlamaRunner::generate(const std::string& prompt,
 	const int budget = std::max(1, ip.max_tokens);
 	const int every = std::max(1, budget / 20);
 
+	// incremental buffer + depth tracking (thread-local)
+	static thread_local std::string text_so_far;
+	static thread_local int  braceDepth = 0;    // { }
+	static thread_local int  bracketDepth = 0;  // [ ]
+	static thread_local bool seenOpeningBrace = false;
+
 	for (int32_t i = 0; i < ip.max_tokens; ++i) {
 		if (impl->cancelRequested.load(std::memory_order_relaxed)) {
 			stopReason = "canceled";
 			break;
 		}
+
 		llama_token next = llama_sampler_sample(chain, impl->ctx, -1);
 		if (next == LLAMA_TOKEN_NULL) { stopReason = "decode_fail"; break; }
 
@@ -317,9 +318,73 @@ std::string LlamaRunner::generate(const std::string& prompt,
 		int8_t logits = 1; b.logits = &logits;
 		if (llama_decode(impl->ctx, b) < 0) { stopReason = "decode_fail"; break; }
 
+		// ---------- incremental detokenize & stopping ----------
+		if (i == 0) {
+			text_so_far.clear();
+			braceDepth = 0;
+			bracketDepth = 0;
+			seenOpeningBrace = false;
+		}
+
+		// detokenize just the last token into a small piece
+		std::string piece;
+		{
+			llama_token tok_arr[1] = { next };
+			int need = llama_detokenize(vocab, tok_arr, 1, nullptr, 0,
+				/*remove_special*/false, /*unparse_special*/true);
+			if (need < 0) need = -need;
+			if (need > 0) {
+				piece.resize((size_t)need);
+				int got = llama_detokenize(vocab, tok_arr, 1, piece.data(), need,
+					/*remove_special*/false, /*unparse_special*/true);
+				if (got > 0 && got < need) piece.resize((size_t)got);
+			}
+		}
+
+		// accumulate
+		if (!piece.empty())
+			text_so_far += piece;
+
+		// update depth counters from this piece
+		if (!piece.empty()) {
+			for (char c : piece) {
+				if (c == '{') { seenOpeningBrace = true; ++braceDepth; }
+				else if (c == '}') { if (braceDepth > 0) --braceDepth; }
+				else if (c == '[') { ++bracketDepth; }
+				else if (c == ']') { if (bracketDepth > 0) --bracketDepth; }
+			}
+		}
+
+		// 1) user-provided stop strings (wrappers only; we removed raw "}")
+		if (!ip.stop.empty() && !piece.empty()) {
+			bool hitStop = false;
+			for (const auto& stopper : ip.stop) {
+				if (!stopper.empty() && text_so_far.find(stopper) != std::string::npos) {
+					hitStop = true; break;
+				}
+			}
+			if (hitStop) {
+				stopReason = "stop_str";
+				// small debug preview
+				std::string tail = text_so_far.size() > 120 ? text_so_far.substr(text_so_far.size() - 120) : text_so_far;
+				emitLog(std::string("Stop(str) tail: \"") + tail + "\"", errorOut, onLog);
+				goto gen_loop_done;
+			}
+		}
+
+		// 2) balanced JSON object/array: stop once both depths return to zero
+		if (seenOpeningBrace && braceDepth == 0 && bracketDepth == 0) {
+			stopReason = "balanced_json";
+			goto gen_loop_done;
+		}
+
+		// progress
 		if (((i + 1) % every) == 0 || (i + 1) == budget)
 			emitProgress(std::string("Gen ") + makeBar((i + 1), budget), onLog);
 	}
+
+gen_loop_done:
+
 
 	const auto tGenEnd = clock::now();
 	llama_sampler_free(chain);

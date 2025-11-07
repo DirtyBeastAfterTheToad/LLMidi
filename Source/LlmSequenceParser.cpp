@@ -3,77 +3,180 @@
 #include <stdexcept>
 #include <algorithm>
 #include <JuceHeader.h>
-
 #include "NoteUtils.h"
 
 namespace {
-
 	// Matches:  A#3  or  A#3-72
 	// group1: pitch name (A..G with optional #/b)
 	// group2: octave (may be negative)
 	// group3: optional velocity (1..3 digits; clamped later)
 	const std::regex kNoteRegex(R"(^([A-G][#b]?)(-?\d+)(?:-([0-9]{1,3}))?$)");
 
-	// Converts a JUCE var (step) into StepEvent.
-	StepEvent parseStepVar(const juce::var& v, int defaultVel, std::string& err)
+	inline int clampVel(int v) { return std::max(1, std::min(127, v)); }
+
+	// Convert chord-like tokens (Cm7, Cmaj7, Cmin9, Bb7-90, etc.)
+// into a playable single-note token by keeping the root
+// and replacing the rest with an octave number.
+// - "Cm7" -> "C7"
+// - "Bbmaj7-90" -> "Bb7-90"
+// - "F#sus2" -> "F#7"
+// - keeps per-note velocity suffix if present
+// - If the token already matches kNoteRegex, returns unchanged
+	static std::string normalizeChordishToken(const std::string& in, int defaultOctave)
 	{
-		StepEvent se;
+		// already a clean note token? keep it
+		if (std::regex_match(in, kNoteRegex))
+			return in;
 
-		if (v.isString())
+		// split optional velocity suffix "-NNN" at end
+		std::string core = in;
+		std::string velSuffix;
 		{
-			const std::string tok = v.toString().trim().toStdString();
-			if (tok == ".") { se.kind = StepEvent::Kind::Rest;    return se; }
-			if (tok == "-") { se.kind = StepEvent::Kind::Sustain; return se; }
-
-			try {
-				auto [midi, vel] = parseNoteToken(tok, defaultVel);
-				se.kind = StepEvent::Kind::Notes;
-				se.notes.push_back({ midi, vel });
-				return se;
-			}
-			catch (const std::exception& e) {
-				err = e.what();
-				return {};
+			std::smatch mm;
+			static const std::regex velTail(R"(^(.*?)-([0-9]{1,3})$)");
+			if (std::regex_match(core, mm, velTail)) {
+				core = mm[1].str();
+				velSuffix = mm[2].str();
 			}
 		}
 
-		if (auto* arr = v.getArray())
-		{
-			StepEvent chord;
-			chord.kind = StepEvent::Kind::Notes;
+		// find root (A–G) + optional accidental
+		size_t i = 0;
+		while (i < core.size() && std::isspace((unsigned char)core[i])) ++i;
+		if (i >= core.size()) return in;
 
-			if (arr->isEmpty()) { chord.kind = StepEvent::Kind::Rest; return chord; }
-
-			for (const auto& el : *arr)
-			{
-				if (!el.isString()) { err = "Chord element is not a string"; return {}; }
-				const juce::String tok = el.toString().trim();
-
-				// NEW: skip illegal tokens inside chord arrays
-				if (tok == "-" || tok == ".") continue;
-
-				try {
-					auto [midi, vel] = parseNoteToken(tok.toStdString(), defaultVel);
-					chord.notes.push_back({ midi, vel });
-				}
-				catch (const std::exception& e) {
-					err = e.what();
-					return {};
-				}
-			}
-
-			if (chord.notes.empty()) {
-				// If everything was skipped, treat as rest
-				chord.kind = StepEvent::Kind::Rest;
-			}
-			return chord;
+		char L = (char)std::toupper((unsigned char)core[i]);
+		if (L < 'A' || L > 'G') return in;
+		std::string root;
+		root.push_back(L);
+		++i;
+		if (i < core.size() && (core[i] == '#' || core[i] == 'b')) {
+			root.push_back(core[i]);
+			++i;
 		}
 
-		err = "Step must be string or array";
-		return {};
+		// look ahead: if the remainder contains "m", "maj", "min", "dim", "aug", "sus", "7", "9", etc.,
+		// we’ll assume it's a chord type and use octave 7
+		const std::string tail = core.substr(i);
+		bool looksLikeChord = false;
+		{
+			static const std::regex chordish(R"((maj|min|dim|aug|sus|add|m|M)?[0-9]*)", std::regex::icase);
+			looksLikeChord = std::regex_search(tail, chordish);
+		}
+
+		// choose octave: 7 for chord-like names, otherwise defaultOctave (4)
+		int octave = looksLikeChord ? 7 : defaultOctave;
+
+		std::string out = root + std::to_string(octave);
+		if (!velSuffix.empty()) {
+			out += "-";
+			out += velSuffix;
+		}
+		return out;
 	}
 
-}
+
+	// Parse a single note token and produce a PlayedNote.
+	// If the token has a "-NN" suffix, that velocity overrides;
+	// otherwise 'eventVel' is used. defaultVelocity is only used to clamp/fallback
+	// when a malformed 0 is encountered (shouldn't happen with the regex).
+	static bool parseNoteIntoPlayed(const juce::String& token,
+		int eventVel,
+		int defaultVelocity,
+		PlayedNote& out,
+		std::string& err)
+	{
+		// Normalize chord-ish tokens to a note token first
+		const std::string raw = token.toStdString();
+		const std::string norm = normalizeChordishToken(raw, /*defaultOctave*/ 4);
+
+		// Now apply the standard note regex to the normalized token
+		std::smatch m;
+		if (!std::regex_match(norm, m, kNoteRegex)) {
+			err = "Bad note token: " + raw; // report the original token for clarity
+			return false;
+		}
+
+		const std::string name = m[1].str();
+		const int octave = std::stoi(m[2].str());
+		int useVel = eventVel;
+
+		if (m[3].matched) {
+			useVel = clampVel(std::stoi(m[3].str()));
+		}
+		else {
+			useVel = clampVel(eventVel);
+		}
+
+		const juce::String noteName = juce::String(name) + juce::String(octave);
+		auto midiOpt = parseNoteName(noteName);
+		if (!midiOpt.has_value()) {
+			err = "Bad pitch name: " + noteName.toStdString();
+			return false;
+		}
+
+		out.midi = *midiOpt;
+		out.velocity = clampVel(useVel <= 0 ? defaultVelocity : useVel);
+		return true;
+	}
+
+
+
+	// Utility: canonicalize a vector of PlayedNote (sort + dedupe by midi then velocity)
+	static void canonicalize(std::vector<PlayedNote>& v) {
+		std::sort(v.begin(), v.end(),
+			[](const PlayedNote& a, const PlayedNote& b) {
+				if (a.midi != b.midi) return a.midi < b.midi;
+				return a.velocity < b.velocity;
+			});
+		v.erase(std::unique(v.begin(), v.end(),
+			[](const PlayedNote& a, const PlayedNote& b) {
+				return a.midi == b.midi && a.velocity == b.velocity;
+			}), v.end());
+	}
+
+	// Parse "C4" or "C4-90" using NoteUtils for pitch.
+	std::pair<int, int> parseOneNoteToken(const juce::String& token, int defaultVelocity) {
+		return parseNoteToken(token.toStdString(), defaultVelocity);
+	}
+
+	// Parse note field that can be string or array of strings.
+	// Applies per-note suffix override; otherwise uses 'eventVel'.
+	static bool parseNoteOrChord(const juce::var& v,
+		int eventVel,
+		int defaultVelocity,
+		std::vector<PlayedNote>& out,
+		std::string& err)
+	{
+		out.clear();
+
+		if (v.isString()) {
+			PlayedNote pn{};
+			if (!parseNoteIntoPlayed(v.toString().trim(), eventVel, defaultVelocity, pn, err))
+				return false;
+			out.push_back(pn);
+			return true;
+		}
+
+		if (auto* arr = v.getArray()) {
+			out.reserve(arr->size());
+			for (const auto& el : *arr) {
+				if (!el.isString()) { err = "Chord element must be a string note token"; return false; }
+				PlayedNote pn{};
+				if (!parseNoteIntoPlayed(el.toString().trim(), eventVel, defaultVelocity, pn, err))
+					return false;
+				out.push_back(pn);
+			}
+			if (out.empty()) { err = "Chord array is empty"; return false; }
+			canonicalize(out);
+			return true;
+		}
+
+		err = "note(s) must be a string or an array of strings";
+		return false;
+	}
+
+} // namespace
 
 std::pair<int, int> parseNoteToken(const std::string& token, int defaultVelocity)
 {
@@ -81,7 +184,7 @@ std::pair<int, int> parseNoteToken(const std::string& token, int defaultVelocity
 	if (!std::regex_match(token, m, kNoteRegex))
 		throw std::invalid_argument("Bad note token: " + token);
 
-	const std::string name = m[1].str();   // e.g., "A#"
+	const std::string name = m[1].str();
 	const int octave = std::stoi(m[2].str());
 	int vel = defaultVelocity;
 
@@ -90,7 +193,6 @@ std::pair<int, int> parseNoteToken(const std::string& token, int defaultVelocity
 
 	vel = std::max(1, std::min(127, vel));
 
-	// Reuse shared helper (keeps pitch-name logic in one place)
 	const juce::String noteName = juce::String(name) + juce::String(octave);
 	auto midiOpt = parseNoteName(noteName);
 	if (!midiOpt.has_value())
@@ -99,7 +201,7 @@ std::pair<int, int> parseNoteToken(const std::string& token, int defaultVelocity
 	return { *midiOpt, vel };
 }
 
-bool parseJsonBars(const std::string& json,
+bool parseEventJson(const std::string& json,
 	int defaultVelocity,
 	std::string& err,
 	ParsedPhrase& out)
@@ -110,40 +212,101 @@ bool parseJsonBars(const std::string& json,
 	juce::var root = juce::JSON::parse(juce::String(json));
 	if (root.isVoid()) { err = "JSON parse failed"; return false; }
 
-	auto* bars = root.getArray();
-	if (!bars) { err = "Top-level must be an array of bars"; return false; }
-	if (bars->isEmpty()) { err = "No bars"; return false; }
+	auto* obj = root.getDynamicObject();
+	if (!obj) { err = "Top-level JSON must be an object"; return false; }
 
-	out.bars.reserve(bars->size());
-	int expectedSteps = -1;
+	const juce::var vb = obj->getProperty("b");
+	const juce::var vs = obj->getProperty("s");
+	const juce::var ve = obj->getProperty("e");
 
-	for (const auto& barVar : *bars)
-	{
-		auto* steps = barVar.getArray();
-		if (!steps) { err = "Bar is not an array of steps"; return false; }
-		if (steps->isEmpty()) { err = "Bar has zero steps"; return false; }
+	if (!vb.isInt() || !vs.isInt() || ve.isVoid()) {
+		err = "Object must contain integer 'b', integer 's', and array 'e'";
+		return false;
+	}
 
-		if (expectedSteps < 0) expectedSteps = steps->size();
-		if (steps->size() != expectedSteps) {
-			err = "Inconsistent steps per bar (found a bar with different length)";
+	const int bars = (int)vb;
+	const int stepsPerBar = (int)vs;
+	if (bars <= 0) { err = "'b' must be > 0"; return false; }
+	if (stepsPerBar <= 0) { err = "'s' must be > 0"; return false; }
+
+	auto* events = ve.getArray();
+	if (!events) { err = "'e' must be an array"; return false; }
+
+	const int totalSteps = bars * stepsPerBar;
+	std::vector<std::vector<PlayedNote>> active(totalSteps); // active notes at each step
+
+	// --- read events ---
+	for (int i = 0; i < events->size(); ++i) {
+		const juce::var& ev = (*events)[i];
+		auto* arr = ev.getArray();
+		if (!arr || arr->size() != 4) {
+			err = "event[" + std::to_string(i) + "] must be an array of length 4";
 			return false;
 		}
 
-		std::vector<StepEvent> bar;
-		bar.reserve(steps->size());
+		// [startStep, noteOrNotes, durationSteps, velocity]
+		const juce::var& vStart = (*arr)[0];
+		const juce::var& vNotes = (*arr)[1];
+		const juce::var& vDur = (*arr)[2];
+		const juce::var& vVel = (*arr)[3];
 
-		for (const auto& stepVar : *steps)
-		{
-			std::string stepErr;
-			StepEvent se = parseStepVar(stepVar, defaultVelocity, stepErr);
-			if (!stepErr.empty()) {
-				err = "Step parse error: " + stepErr;
-				return false;
-			}
-			bar.push_back(std::move(se));
+		if (!vStart.isInt()) { err = "event[" + std::to_string(i) + "]: startStep must be int"; return false; }
+		if (!vDur.isInt()) { err = "event[" + std::to_string(i) + "]: durationSteps must be int"; return false; }
+		if (!vVel.isInt()) { err = "event[" + std::to_string(i) + "]: velocity must be int"; return false; }
+
+		int start = (int)vStart;
+		int dur = (int)vDur;
+		int evVel = clampVel((int)vVel);
+
+		if (start < 0) start = 0;
+		if (dur <= 0) continue; // ignore non-positive durations
+
+		std::vector<PlayedNote> notes;
+		std::string perr;
+		if (!parseNoteOrChord(vNotes, evVel, defaultVelocity, notes, perr)) {
+			err = "event[" + std::to_string(i) + "]: " + perr;
+			return false;
 		}
 
-		out.bars.push_back(std::move(bar));
+		const int endExclusive = std::min(totalSteps, start + dur);
+		if (start >= totalSteps || endExclusive <= start) continue; // out of range; ignore
+
+		for (int t = start; t < endExclusive; ++t) {
+			// append notes; we’ll canonicalize later per step when comparing
+			active[(size_t)t].insert(active[(size_t)t].end(), notes.begin(), notes.end());
+		}
+	}
+
+	// --- synthesize ParsedPhrase ---
+	out.bars.clear();
+	out.bars.resize((size_t)bars);
+	for (int b = 0; b < bars; ++b)
+		out.bars[(size_t)b].resize((size_t)stepsPerBar, StepEvent{ StepEvent::Kind::Rest, {} });
+
+	auto prev = std::vector<PlayedNote>{};
+
+	for (int t = 0; t < totalSteps; ++t) {
+		auto cur = std::move(active[(size_t)t]);
+		canonicalize(cur);
+
+		StepEvent se;
+		if (cur.empty()) {
+			se.kind = StepEvent::Kind::Rest;
+		}
+		else {
+			if (cur == prev) {
+				se.kind = StepEvent::Kind::Sustain;
+			}
+			else {
+				se.kind = StepEvent::Kind::Notes;
+				se.notes = cur;
+			}
+		}
+
+		const int b = t / stepsPerBar;
+		const int s = t % stepsPerBar;
+		out.bars[(size_t)b][(size_t)s] = std::move(se);
+		prev = std::move(cur);
 	}
 
 	return true;

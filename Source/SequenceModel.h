@@ -21,6 +21,16 @@ struct Note
 	uint8_t velocity = 100;  // 1..127
 };
 
+inline bool operator==(const Note& a, const Note& b)
+{
+	return a.midi == b.midi && a.velocity == b.velocity;
+}
+
+inline bool operator!=(const Note& a, const Note& b)
+{
+	return !(a == b);
+}
+
 // One cell in the step grid
 struct Step
 {

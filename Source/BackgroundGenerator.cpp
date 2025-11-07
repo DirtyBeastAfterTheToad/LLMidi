@@ -344,11 +344,11 @@ void BackgroundGenerator::runPatternGeneration(const GenRequest& req)
 	const std::string prompt = buildPrompt(isPhi, user, req.bars, req.steps);
 
 	LlamaInferParams ip;
-	ip.temperature = 0.20f;
-	ip.top_p = 0.90f;
+	ip.temperature = 0.45f;
+	ip.top_p = 0.95f;
 	ip.top_k = 0;
 	ip.repeat_penalty = 1.05f;
-	ip.max_tokens = 512;
+	ip.max_tokens = 2048;
 	ip.seed = req.seed;
 	ip.grammar.clear();
 	ip.stop.clear();
@@ -401,8 +401,7 @@ void BackgroundGenerator::runPatternGeneration(const GenRequest& req)
 			<< "notes=" << summary.totalPlayableNotes
 			<< ", playable steps=" << summary.totalPlayableSteps
 			<< ", sustains=" << summary.totalSustains
-			<< ", rests=" << summary.totalRests
-			<< "\nPreview: " << summary.shortPreview;
+			<< ", rests=" << summary.totalRests;
 		appendLog(s);
 	}
 
@@ -455,38 +454,39 @@ std::string BackgroundGenerator::buildPrompt(bool isPhi,
 {
 	std::ostringstream rules;
 	rules
-		<< "You are a step-based MIDI pattern generator.\n"
-		<< "Return ONLY a JSON array of exactly " << bars << " bars,\n"
-		<< "each bar with exactly " << steps << " steps.\n"
-		<< "Step values:\n"
-		<< "  \".\"  = rest\n"
-		<< "  \"-\"  = sustain previous note/chord\n"
-		<< "  \"A#3\" or \"A#3-80\" = note (velocity 1..127)\n"
-		<< "  [\"A#3\",\"C4-90\", ...] = chord (2+ notes)\n"
+		<< "You are a MIDI pattern generator.\n"
+		<< "Return ONLY one JSON object with this exact shape:\n"
+		<< "{\"b\":" << bars << ",\"s\":" << steps << ",\"e\":[ ... ]}\n"
+		<< "Event format: [startStep, noteOrNotes, durationSteps, velocity]\n"
+		<< "  - startStep: 0-based integer\n"
+		<< "  - noteOrNotes: \"C4\" or [\"C4\",\"E4-80\",\"G4\"]\n"
+		<< "  - durationSteps: positive integer\n"
+		<< "  - velocity: 1..127 (default for notes without -NN)\n"
 		<< "Rules:\n"
-		<< "  - No text before '[' and nothing after the final ']'.\n"
-		<< "  - If two or more notes sound at the same time, use a JSON array (a chord).\n"
-		<< "  - Use at least 3 chord steps per 8 bars.\n"
-		<< "  - Keep velocities mostly in 60..110 unless specified.\n"
-		<< "\n"
-		<< "EXAMPLE (format only):\n"
-		<< "[\n"
-		<< "  [\"C4\",\"-\",[\"C4\",\"E4\",\"G4-95\"],\".\"],\n"
-		<< "  [[\"A3\",\"C4-90\"],\"-\",\".\",\"G3-64\"]\n"
-		<< "]\n"
-		<< "\n"
+		<< "  - No text before '{' and nothing after the final '}'.\n"
+		<< "  - In note fields, use note names only (e.g., \"C3\", \"G#4\").\n"
+		<< "    Do NOT write chord symbols like \"Cm7\".\n"
+		<< "  - COVER ALL BARS: for each bar k in 0.." << (bars - 1) << ", include AT LEAST\n"
+		<< "    ONE  EVENT whose startStep is in\n"
+		<< "    [k*" << steps << ", (k+1)*" << steps << " - 1].\n"
+		<< "  - If multiple notes BEGIN at the same step, put them in ONE event (a chord array).\n"
+		<< "  - Prefer musical variation: you may add single-note events as arpeggios."
+		<< "Indices reminder for b=" << bars << ", s=" << steps << ":\n"
+		<< "  bar0: steps 0.." << (steps - 1)
+		<< ", bar1: " << (steps) << ".." << (2 * steps - 1)
+		<< ", bar2: " << (2 * steps) << ".." << (3 * steps - 1)
+		<< ", bar3: " << (3 * steps) << ".." << (4 * steps - 1) << " etc.\n"
+		<< "Example:\n"
+		<< "{\"b\":8,\"s\":4,\"e\":[[0,[\"A#3\",\"D4\",\"F4\"],4,85],[4,[\"G3\",\"C4\",\"D#4\"],4,85],[8,[\"A#3\",\"D4\"],2,85],[9,\"F4\",1,72],[12,[\"G3\",\"C4\",\"D#4\"],4,85]]}\n"
 		<< "Style: " << user << "\n";
 	std::ostringstream prompt;
-	if (isPhi)
-	{
+	if (isPhi) {
 		prompt << "<|user|>\n" << rules.str()
 			<< "<|end|>\n<|assistant|>";
 	}
-	else
-	{
+	else {
 		prompt << "<s>[INST] <<SYS>>" << rules.str() << "<</SYS>> [/INST]";
 	}
-
 	return prompt.str();
 }
 
@@ -501,91 +501,42 @@ std::optional<ParsedPhrase> BackgroundGenerator::sanitizeAndParse(const std::str
 	while (!text.empty() && std::isspace((unsigned char)text.front())) text.erase(text.begin());
 	while (!text.empty() && std::isspace((unsigned char)text.back()))  text.pop_back();
 
-	if (auto pos = text.rfind(']'); pos != std::string::npos)
-		text = text.substr(0, pos + 1);
-
-	{
-		juce::String s = text.c_str();
-		s = s.replace("\"-.\"", "\"-\"");
-		s = s.replace("\".-\"", "\".\"");
-		s = s.replace("\"_\"", "\"-\"");
-		text = s.toStdString();
-	}
-
-	auto extractBalancedArray = [](const std::string& s) -> std::optional<std::string>
+	// Extract balanced top-level {...}
+	auto extractBalancedBraces = [](const std::string& s) -> std::optional<std::string>
 		{
-			size_t start = s.find('[');
+			size_t start = s.find('{');
 			if (start == std::string::npos) return std::nullopt;
 
 			int depth = 0;
 			for (size_t i = start; i < s.size(); ++i) {
 				char c = s[i];
-				if (c == '[') ++depth;
-				else if (c == ']') {
+				if (c == '{') ++depth;
+				else if (c == '}') {
 					--depth;
 					if (depth == 0) return s.substr(start, i - start + 1);
 				}
 			}
 			return std::nullopt;
 		};
-	if (auto balanced = extractBalancedArray(text))
+
+	if (auto balanced = extractBalancedBraces(text))
 		text = *balanced;
-
-	bool looksQuotedJson = (text.find('\"') != std::string::npos);
-
-	if (!looksQuotedJson) {
-		std::string out;
-		out.reserve(text.size());
-		bool inBracket = false;
-		std::string token;
-
-		auto flushToken = [&](bool forceQuote) {
-			if (token.empty()) return;
-			static const std::regex noteRe(R"(^[A-G][#b]?-?\d+(?:-\d{1,3})?$)");
-			if (std::regex_match(token, noteRe)) {
-				out += forceQuote ? ("\"" + token + "\"") : token;
-			}
-			else {
-				out += token;
-			}
-			token.clear();
-			};
-
-		for (size_t i = 0; i < text.size(); ++i) {
-			char c = text[i];
-			if (c == '[') { inBracket = true; out += c; }
-			else if (c == ']') { flushToken(inBracket); inBracket = false; out += c; }
-			else if (inBracket && (c == ',' || std::isspace((unsigned char)c))) {
-				flushToken(true);
-				out += c;
-			}
-			else {
-				token.push_back(c);
-			}
-		}
-		flushToken(inBracket);
-		text = out;
+	else {
+		// last-chance slice between first '{' and last '}'
+		auto l = text.find('{');
+		auto r = text.rfind('}');
+		if (l != std::string::npos && r != std::string::npos && r > l)
+			text = text.substr(l, r - l + 1);
 	}
 
 	ParsedPhrase phrase;
 	std::string perr;
-	if (!parseJsonBars(text, defaultVelocity, perr, phrase)) {
-		appendLog("Parse error: " + juce::String(perr));
+	appendLog("Slice to parse (len=" + juce::String((int)text.size()) + "): " +
+		juce::String(text.substr(0, std::min<size_t>(text.size(), 160)).c_str()));
 
-		auto l = text.find('[');
-		auto r = text.rfind(']');
-		if (l != std::string::npos && r != std::string::npos && r > l) {
-			std::string salvage = text.substr(l, r - l + 1);
-			perr.clear();
-			ParsedPhrase salvagePhrase;
-			if (parseJsonBars(salvage, defaultVelocity, perr, salvagePhrase)) {
-				appendLog("Recovered JSON by slicing outer brackets.");
-				phrase = std::move(salvagePhrase);
-			}
-			else {
-				appendLog("Salvage also failed: " + juce::String(perr));
-			}
-		}
+	if (!parseEventJson(text, defaultVelocity, perr, phrase)) {
+		appendLog("Parse error: " + juce::String(perr));
+		return std::nullopt;
 	}
 
 	if (phrase.bars.empty())

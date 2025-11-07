@@ -403,7 +403,7 @@ void LLMidiAudioProcessorEditor::updateGenProgress()
 		genProgressBar.setVisible(false);
 
 		genStageLabel.setVisible(true);
-		genStageLabel.setText("Generation failed — check log.", juce::dontSendNotification);
+		genStageLabel.setText("Generation failed - check log.", juce::dontSendNotification);
 		genStageLabel.setColour(juce::Label::textColourId, juce::Colours::orangered);
 
 		stopButton.setVisible(false);
