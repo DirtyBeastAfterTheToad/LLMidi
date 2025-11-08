@@ -211,7 +211,7 @@ void OfflinePage::resized()
 
 void OfflinePage::paint(juce::Graphics& g)
 {
-	g.fillAll(juce::Colours::black.withBrightness(0.12f));
+	g.fillAll(getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId));
 }
 
 void OfflinePage::paintOverChildren(juce::Graphics& g)

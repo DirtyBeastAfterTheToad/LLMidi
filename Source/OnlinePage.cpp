@@ -98,7 +98,7 @@ void OnlinePage::resized()
 
 void OnlinePage::paint(juce::Graphics& g)
 {
-	g.fillAll(juce::Colours::black.withBrightness(0.12f));
+	g.fillAll(getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId));
 }
 
 void OnlinePage::paintOverChildren(juce::Graphics& g)

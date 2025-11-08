@@ -1,13 +1,111 @@
 #include "PluginEditor.h"
 #include "PluginProcessor.h"
 
-// ===================== Constructor / Destructor =====================
+static void installSettingsIconTab(juce::TabbedComponent& tabs,
+	int settingsTabIndex,
+	std::unique_ptr<juce::Drawable> normal,
+	std::unique_ptr<juce::Drawable> hover)
+{
+	struct CenteredIcon : public juce::Component, private juce::Timer
+	{
+		std::unique_ptr<juce::Drawable> normalImg, hoverImg;
+		bool isOver = false;
+
+		CenteredIcon(std::unique_ptr<juce::Drawable> n, std::unique_ptr<juce::Drawable> h)
+			: normalImg(std::move(n)), hoverImg(std::move(h)) {
+			startTimerHz(30);
+		}
+		void paint(juce::Graphics& g) override
+		{
+			const float scale = 0.4f;
+
+			auto area = getParentComponent()
+				? getParentComponent()->getLocalBounds().toFloat()
+				: getLocalBounds().toFloat();
+
+			auto iconArea = area.withSizeKeepingCentre(area.getWidth() * scale,
+				area.getHeight() * scale);
+
+			if (auto* d = (isOver && hoverImg ? hoverImg.get() : normalImg.get()))
+				d->drawWithin(g, iconArea, juce::RectanglePlacement::centred, 1.0f);
+		}
+		void mouseEnter(const juce::MouseEvent&) override { isOver = true;  repaint(); }
+		void mouseExit(const juce::MouseEvent&) override { isOver = false; repaint(); }
+
+		void timerCallback() override
+		{
+			if (auto* p = getParentComponent())
+				setBounds(p->getLocalBounds());
+		}
+	};
+
+	auto& bar = tabs.getTabbedButtonBar();
+	if (auto* btn = bar.getTabButton(settingsTabIndex))
+	{
+		btn->setButtonText(" ");
+
+		auto* icon = new CenteredIcon(std::move(normal), std::move(hover));
+		icon->setInterceptsMouseClicks(false, false);
+
+		btn->setExtraComponent(icon, juce::TabBarButton::ExtraComponentPlacement::beforeText);
+	}
+}
+
 LLMidiAudioProcessorEditor::LLMidiAudioProcessorEditor(LLMidiAudioProcessor& p)
 	: AudioProcessorEditor(&p), audioProcessor(p)
 {
 	addAndMakeVisible(tabs);
 	tabs.addTab("Offline", juce::Colours::darkgrey, new OfflinePage(), true);
 	tabs.addTab("Online", juce::Colours::darkgrey, new OnlinePage(), true);
+
+	tabs.addTab("Settings", juce::Colours::darkgrey, new SettingsPage(), true);
+	settingsTabIndex = tabs.getNumTabs() - 1;
+	settingsPage.reset(dynamic_cast<SettingsPage*>(tabs.getTabContentComponent(settingsTabIndex)));
+
+	installSettingsIconTab(
+		tabs,
+		settingsTabIndex,
+		IconLibrary::makeGearDrawable(juce::Colours::lightgrey),
+		IconLibrary::makeGearDrawable(juce::Colours::darkgrey)
+	);
+	if (settingsPage)
+	{
+		settingsPage->setCacheSizeText(prettyBytes(getFolderSizeRecursive(cacheDirPath())));
+
+		settingsPage->onDeleteCacheRequested = [this]
+			{
+				juce::AlertWindow::showOkCancelBox(
+					juce::AlertWindow::WarningIcon,
+					"Delete cache?",
+					"Deleting the cache will remove all saved model prefix caches.\n"
+					"This is safe, but the next generation with previously used models will be slower while the cache rebuilds.\n\n"
+					"Do you want to proceed?",
+					"Delete cache", "Cancel",
+					this,
+					juce::ModalCallbackFunction::create([this](int res)
+						{
+							if (res == 0) return; // Cancel
+							auto dir = cacheDirPath();
+							dir.deleteRecursively();
+							dir.createDirectory();
+							if (settingsPage) settingsPage->setCacheSizeText("0 B");
+						})
+				);
+			};
+
+		settingsPage->onThemeChanged = [this](int idx)
+			{
+				auto& lf = getLookAndFeel();
+				switch (idx)
+				{
+				default:
+				case 0:
+				case 1: lf.setColour(juce::ResizableWindow::backgroundColourId, juce::Colours::darkgrey.darker(0.6f)); break;
+				case 2: lf.setColour(juce::ResizableWindow::backgroundColourId, juce::Colours::black); break;
+				}
+				repaint();
+			};
+	}
 
 	offlinePage.reset(dynamic_cast<OfflinePage*>(tabs.getTabContentComponent(0)));
 	onlinePage.reset(dynamic_cast<OnlinePage*>(tabs.getTabContentComponent(1)));
@@ -70,8 +168,8 @@ LLMidiAudioProcessorEditor::LLMidiAudioProcessorEditor(LLMidiAudioProcessor& p)
 	}
 
 	setSize(kWindowW, kBaseH);
-
-	// Default hidden logs + progress & stop controls
+	getLookAndFeel().setColour(juce::ResizableWindow::backgroundColourId,
+		juce::Colours::darkgrey.darker(0.6f));
 	logsVisible = false;
 	if (offlinePage)
 	{
@@ -121,9 +219,10 @@ LLMidiAudioProcessorEditor::LLMidiAudioProcessorEditor(LLMidiAudioProcessor& p)
 	startTimerHz(15);
 }
 
-LLMidiAudioProcessorEditor::~LLMidiAudioProcessorEditor() {}
+LLMidiAudioProcessorEditor::~LLMidiAudioProcessorEditor() {
+	tabs.getTabbedButtonBar().setLookAndFeel(nullptr);
+}
 
-// ===================== Painting / Resizing =====================
 void LLMidiAudioProcessorEditor::paint(juce::Graphics& g)
 {
 	g.fillAll(getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId));
@@ -138,19 +237,16 @@ void LLMidiAudioProcessorEditor::visibilityChanged()
 {
 	if (wasVisible && !isVisible())
 	{
-		// going hidden -> save everything
 		saveUiMemoryToProcessor();
 	}
 	else if (!wasVisible && isVisible())
 	{
-		// becoming visible again -> restore everything
 		loadUiMemoryFromProcessor();
 		syncUiFromProcessorOnce();
 	}
 	wasVisible = isVisible();
 }
 
-// ===================== Timer / Sync =====================
 void LLMidiAudioProcessorEditor::timerCallback()
 {
 	lastSelectedTabIndex = tabs.getCurrentTabIndex();
@@ -363,7 +459,6 @@ void LLMidiAudioProcessorEditor::updateLogView()
 	lastRenderedLog = combined;
 }
 
-// ===================== Buttons =====================
 void LLMidiAudioProcessorEditor::onClickLoadModel()
 {
 	modelChooser = std::make_unique<juce::FileChooser>("Select a GGUF model", juce::File(), "*.gguf");
@@ -470,7 +565,6 @@ void LLMidiAudioProcessorEditor::onClickReroll()
 	appendUiLogLine("[UI] Seed reset to -1 (reroll).");
 }
 
-// ===================== Helpers =====================
 void LLMidiAudioProcessorEditor::appendUiLogLine(const juce::String& line)
 {
 	if (!offlinePage) return;
@@ -531,4 +625,30 @@ void LLMidiAudioProcessorEditor::loadUiMemoryFromProcessor()
 		onlinePage->setToMidiGlow(mem.onlineToMidiGlow);
 	}
 }
+juce::int64 LLMidiAudioProcessorEditor::getFolderSizeRecursive(const juce::File& dir)
+{
+	juce::int64 total = 0;
+	if (!dir.isDirectory()) return 0;
+	juce::Array<juce::File> entries;
+	dir.findChildFiles(entries, juce::File::findFilesAndDirectories, false);
+	for (auto f : entries)
+		total += f.isDirectory() ? getFolderSizeRecursive(f) : f.getSize();
+	return total;
+}
 
+juce::String LLMidiAudioProcessorEditor::prettyBytes(juce::int64 bytes)
+{
+	const double b = (double)bytes;
+	if (b < 1024.0) return juce::String((int)b) + " B";
+	const double kb = b / 1024.0;  if (kb < 1024.0) return juce::String(kb, 1) + " KB";
+	const double mb = kb / 1024.0; if (mb < 1024.0) return juce::String(mb, 1) + " MB";
+	const double gb = mb / 1024.0; return juce::String(gb, 2) + " GB";
+}
+
+juce::File LLMidiAudioProcessorEditor::cacheDirPath()
+{
+	auto d = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+		.getChildFile("LLMidi").getChildFile("cache");
+	d.createDirectory();
+	return d;
+}
