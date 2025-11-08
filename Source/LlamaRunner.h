@@ -42,11 +42,14 @@ public:
 	std::string getLoadedModelPath() const;
 	bool isLoaded() const;
 
-	std::string generate(const std::string& prompt,
+	std::string generate(const std::string& staticPrefix,
+		const std::string& dynamicSuffix,
+		const std::string& sessionFilePath,
 		const LlamaInferParams& ip,
 		double* outTokensPerSec,
 		std::string* errorOut,
 		LogFn onLog);
+
 	void requestCancel();
 private:
 	struct Impl;

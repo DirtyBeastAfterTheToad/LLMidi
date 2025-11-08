@@ -167,7 +167,7 @@ void OnlinePage::copyPromptToClipboard()
 		<< "* If the style truly calls for staccato, you may use more 1-step notes, but still keep >=30% with durationSteps >= 2.\n"
 		<< "* Quick cheat sheet for s=4: 1=quarter note, 2=half note, 3=dotted half, 4=whole note.\n"
 		<< "\n"
-		<< "Mini example (for illustration only — your output must be a single JSON object without comments):\n"
+		<< "Mini example (for illustration only â€” your output must be a single JSON object without comments):\n"
 		<< "{\n"
 		<< "  \"b\": 8,\n"
 		<< "  \"s\": 4,\n"

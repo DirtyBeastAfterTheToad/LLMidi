@@ -331,7 +331,7 @@ void BackgroundGenerator::runPatternGeneration(const GenRequest& req)
 	appendLog("Pattern gen: starting...");
 
 	const std::string user = req.prompt.empty()
-		? "Nostalgic plucky arpeggio in E minor with space, light syncopation."
+		? "Piano melody on E minor"
 		: req.prompt;
 
 	std::string modelPath;
@@ -340,6 +340,19 @@ void BackgroundGenerator::runPatternGeneration(const GenRequest& req)
 
 	const juce::String mp(modelPath.c_str());
 	const bool isPhi = mp.isNotEmpty() && mp.toLowerCase().contains("phi");
+	const std::string staticRules = buildStaticRules(req.bars, req.steps);
+	const std::string dynamicTask = buildDynamicTask(user, req.bars, req.steps);
+	juce::File cacheDir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+		.getChildFile("LLMidi").getChildFile("cache");
+	cacheDir.createDirectory();
+
+	juce::String sessionKey = juce::String(loadedModelPath.c_str()) + "\n" + juce::String(staticRules.c_str());
+	const size_t n = (size_t)sessionKey.getNumBytesAsUTF8();
+	juce::MD5 md5(sessionKey.toRawUTF8(), n);
+	juce::String hex = md5.toHexString();
+
+	juce::File sessionFile = cacheDir.getChildFile(hex + ".session");
+
 
 	const std::string prompt = buildPrompt(isPhi, user, req.bars, req.steps);
 
@@ -348,7 +361,7 @@ void BackgroundGenerator::runPatternGeneration(const GenRequest& req)
 	ip.top_p = 0.95f;
 	ip.top_k = 0;
 	ip.repeat_penalty = 1.05f;
-	ip.max_tokens = 2048;
+	ip.max_tokens = 1024;
 	ip.seed = req.seed;
 	ip.grammar.clear();
 	ip.stop.clear();
@@ -362,14 +375,13 @@ void BackgroundGenerator::runPatternGeneration(const GenRequest& req)
 	double tps = 0.0;
 	std::string genErr;
 	const std::string raw = runner->generate(
-		prompt,
+		staticRules,
+		dynamicTask,
+		sessionFile.getFullPathName().toStdString(),
 		ip,
 		&tps,
 		/*errorOut*/ &genErr,
-		/*onLog*/ [this](const std::string& line)
-		{
-			this->appendLog(juce::String(line));
-		});
+		/*onLog*/ [this](const std::string& line) { this->appendLog(juce::String(line)); });
 	if (!genErr.empty())
 		appendLog("LLM error: " + juce::String(genErr));
 
@@ -527,6 +539,74 @@ std::string BackgroundGenerator::buildPrompt(bool isPhi,
 	}
 	return prompt.str();
 }
+std::string BackgroundGenerator::buildDynamicTask(const std::string& user, int bars, int steps) const {
+	std::ostringstream ss;
+	ss << "You are a MIDI pattern generator.\n"
+		<< "Task: Generate a " << bars << "-bar musical pattern for the request: \"" << user << "\".\n";
+	return ss.str();
+}
+
+std::string BackgroundGenerator::buildStaticRules(int bars, int steps) const {
+	std::ostringstream rules;
+	rules
+		<< "Output REQUIREMENTS (must follow EXACTLY):\n"
+		<< "* Output ONLY a single JSON object. No prose, no markdown, no code fences, no prefix/suffix.\n"
+		<< "* JSON schema:\n"
+		<< "{\n"
+		<< "  \"b\": " << bars << ",\n"
+		<< "  \"s\": " << steps << ",               // integer: steps per bar\n"
+		<< "  \"e\": [                // array of events\n"
+		<< "    [startStep, noteOrNotes, durationSteps, velocity],\n"
+		<< "    ...\n"
+		<< "  ]\n"
+		<< "}\n"
+		<< "\n"
+		<< "Event format details:\n"
+		<< "* startStep: integer >= 0. The timeline is in steps, totalSteps = b * s.\n"
+		<< "* durationSteps: integer >= 1.\n"
+		<< "* velocity: integer 1..127 (typical 60..110).\n"
+		<< "* noteOrNotes: either a string note token (e.g., \"C4\", \"Bb3-90\", \"F#5\")\n"
+		<< "  or an array of note tokens for chords (e.g., [\"C4\",\"E4-88\",\"G4\"]).\n"
+		<< "  A note token may include an optional per-note velocity suffix \"-NN\" (1..127),\n"
+		<< "  which overrides the event velocity for that note.\n"
+		<< "\n"
+		<< "Rhythm & durations (important):\n"
+		<< "* Do NOT quantize everything to durationSteps=1.\n"
+		<< "* Use a VARIETY of durationSteps values (e.g., 1,2,3,4...).\n"
+		<< "* At least 50% of events MUST have durationSteps >= 2 (sustained notes/chords).\n"
+		<< "* Include some longer notes/chords that span across steps or even across bar boundaries when musical.\n"
+		<< "* If the style truly calls for staccato, you may use more 1-step notes, but still keep >=30% with durationSteps >= 2.\n"
+		<< "* Quick cheat sheet for s=" << steps << ": 1 = " << (steps == 4 ? "quarter" : "1/" + std::to_string(steps))
+		<< " note, 2 = longer sustain, etc.\n"
+		<< "\n"
+		<< "Mini example (for illustration only — your output must be a single JSON object without comments):\n"
+		<< "{\n"
+		<< "  \"b\": 8,\n"
+		<< "  \"s\": 4,\n"
+		<< "  \"e\": [\n"
+		<< "    [0,  \"C4\",        2, 96],\n"
+		<< "    [2,  [\"E4\",\"G4\"],3, 92],\n"
+		<< "    [8,  \"D4-88\",     4, 88],\n"
+		<< "    [16, [\"E4\",\"G4\"],2, 96],\n"
+		<< "    [22, \"B3\",        1, 90]\n"
+		<< "  ]\n"
+		<< "}\n"
+		<< "\n"
+		<< "Constraints and guidance:\n"
+		<< "* Use exactly b=" << bars << " bars. Use s=" << steps << ".\n"
+		<< "* Keep events within the total range (0 .. b*s-1). Overlap is allowed.\n"
+		<< "* Sort events in ascending startStep. Avoid zero/negative durations.\n"
+		<< "* Style should reflect the request (key, register, density, repetition/variation).\n"
+		<< "* Use varied durationSteps; at least half of the events must sustain (durationSteps >= 2).\n"
+		<< "* Avoid making all events durationSteps=1 unless the style explicitly demands strict staccato.\n"
+		<< "* COVER ALL BARS: for each bar k in 0.." << (bars - 1) << ", include AT LEAST ONE event with startStep in "
+		<< "[k*" << steps << ", (k+1)*" << steps << " - 1].\n"
+		<< "* If multiple notes BEGIN at the same step, put them in ONE event (a chord array).\n"
+		<< "\n"
+		<< "Important: Return ONLY the JSON object. Start with '{' and end with '}'.\n";
+	return rules.str();
+}
+
 
 std::optional<ParsedPhrase> BackgroundGenerator::sanitizeAndParse(const std::string& raw,
 	int defaultVelocity)

@@ -68,6 +68,9 @@ private:
 
 	void publishTimeline(const Sequence& seq, double startPPQ, double beatsPerBar);
 	std::string buildPrompt(bool isPhi, const std::string& user, int bars, int steps) const;
+	std::string buildStaticRules(int bars, int steps) const;
+	std::string buildDynamicTask(const std::string& user, int bars, int steps) const;
+
 	std::optional<ParsedPhrase> sanitizeAndParse(const std::string& raw, int defaultVelocity);
 	void appendLog(const juce::String& line);
 

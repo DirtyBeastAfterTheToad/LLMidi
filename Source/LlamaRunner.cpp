@@ -23,7 +23,6 @@ struct LlamaRunner::Impl {
 	std::atomic<bool> cancelRequested{ false };
 };
 
-// ---------- helpers ----------
 namespace {
 
 	inline void appendLine(std::string* sink, const std::string& line) {
@@ -53,7 +52,6 @@ namespace {
 		return out;
 	}
 
-	// --- tokenization / detokenization (correct negative sizes) ---
 	inline bool tokenize(const llama_vocab* vocab, const std::string& s,
 		std::vector<llama_token>& out, std::string* err) {
 		const bool add_special = true;
@@ -62,7 +60,7 @@ namespace {
 		int32_t need = llama_tokenize(vocab, s.c_str(), (int32_t)s.size(),
 			nullptr, 0, add_special, parse_special);
 		if (need == INT32_MIN) { if (err) *err = "tokenize overflow"; return false; }
-		if (need < 0) need = -need;    // IMPORTANT
+		if (need < 0) need = -need;
 		if (need == 0) { if (err) *err = "tokenize() returned 0 tokens"; return false; }
 
 		out.resize((size_t)need);
@@ -70,7 +68,7 @@ namespace {
 			out.data(), (int32_t)out.size(),
 			add_special, parse_special);
 		if (got == INT32_MIN) { if (err) *err = "tokenize overflow (2)"; return false; }
-		if (got < 0) got = -got;       // IMPORTANT
+		if (got < 0) got = -got;
 		if (got == 0) { if (err) *err = "tokenize failed"; return false; }
 		out.resize((size_t)got);
 		return true;
@@ -92,18 +90,20 @@ namespace {
 		return true;
 	}
 
-	// --- feed prompt tokens into context ---
 	inline bool feed_prompt(llama_context* ctx,
 		const std::vector<llama_token>& toks,
+		int32_t startPos,
+		const char* progressLabel,
 		std::string* err,
 		LlamaRunner::LogFn onLog,
-		std::atomic<bool>* cancelFlag) {
+		std::atomic<bool>* cancelFlag)
+	{
 		const int total = (int)toks.size();
 		const int every = std::max(1, total / 20);
 
-		emitProgress(std::string("Prompt ") + makeBar(0, total), onLog);
+		emitProgress(std::string(progressLabel) + makeBar(0, total), onLog);
 
-		int32_t pos = 0;
+		int32_t pos = startPos;
 		for (int i = 0; i < total; ++i) {
 			if (cancelFlag && cancelFlag->load(std::memory_order_relaxed)) {
 				if (err) *err = "canceled";
@@ -132,13 +132,12 @@ namespace {
 			}
 
 			if ((i % every) == 0)
-				emitProgress(std::string("Prompt ") + makeBar(i, total), onLog);
+				emitProgress(std::string(progressLabel) + makeBar(i, total), onLog);
 		}
 
-		emitProgress(std::string("Prompt ") + makeBar(total, total), onLog);
+		emitProgress(std::string(progressLabel) + makeBar(total, total), onLog);
 		return true;
 	}
-
 	// --- sampler chain ---
 	inline llama_sampler* build_sampler_chain(
 		const LlamaInferParams& ip,
@@ -233,7 +232,9 @@ std::string LlamaRunner::getLoadedModelPath() const {
 void LlamaRunner::requestCancel() {
 	if (impl) impl->cancelRequested.store(true, std::memory_order_relaxed);
 }
-std::string LlamaRunner::generate(const std::string& prompt,
+std::string LlamaRunner::generate(const std::string& staticPrefix,
+	const std::string& dynamicSuffix,
+	const std::string& sessionFilePath,
 	const LlamaInferParams& inParams,
 	double* outTokensPerSec,
 	std::string* errorOut,
@@ -241,10 +242,8 @@ std::string LlamaRunner::generate(const std::string& prompt,
 	if (!isLoaded()) { if (errorOut) *errorOut = "Model not loaded"; return {}; }
 
 	std::lock_guard<std::mutex> guard(impl->mtx);
-
 	impl->cancelRequested.store(false, std::memory_order_relaxed);
 
-	// fresh ctx each call
 	if (impl->ctx) { llama_free(impl->ctx); impl->ctx = nullptr; }
 	impl->ctx = llama_init_from_model(impl->model, impl->ctxParams);
 	if (!impl->ctx) { if (errorOut) *errorOut = "ctx reinit failed"; return {}; }
@@ -254,31 +253,86 @@ std::string LlamaRunner::generate(const std::string& prompt,
 	using clock = std::chrono::steady_clock;
 	const auto tAllStart = clock::now();
 
-	// tokenize prompt (robust)
-	std::vector<llama_token> prompt_tokens;
-	if (!tokenize(vocab, prompt, prompt_tokens, errorOut)) return {};
-	emitLog("Prompt tokens: " + std::to_string(prompt_tokens.size()), errorOut, onLog);
-	if ((int)prompt_tokens.size() >= impl->n_ctx) {
-		appendLine(errorOut, "prompt too long for n_ctx");
+	std::vector<llama_token> tokStatic, tokDyn;
+	if (!tokenize(vocab, staticPrefix, tokStatic, errorOut)) return {};
+	if (!tokenize(vocab, dynamicSuffix, tokDyn, errorOut))  return {};
+
+	if ((int)tokStatic.size() >= impl->n_ctx) {
+		appendLine(errorOut, "static prefix too long for n_ctx");
+		return {};
+	}
+	if ((int)(tokStatic.size() + tokDyn.size()) >= impl->n_ctx) {
+		appendLine(errorOut, "combined prompt too long for n_ctx");
 		return {};
 	}
 
-	// feed
-	if (!feed_prompt(impl->ctx, prompt_tokens, errorOut, onLog, &impl->cancelRequested)) return {};
+	size_t n_loaded = 0;
+	std::vector<llama_token> tmp((size_t)impl->n_ctx); // buffer for tokens read
+	bool haveCache = false;
+
+	if (!sessionFilePath.empty()) {
+		bool ok = llama_state_load_file(
+			impl->ctx,
+			sessionFilePath.c_str(),
+			tmp.data(),
+			tmp.size(),
+			&n_loaded);
+		if (ok && n_loaded > 0) {
+			const size_t common = std::min(n_loaded, tokStatic.size());
+			bool prefixMatch = std::equal(tokStatic.begin(), tokStatic.begin() + common, tmp.begin());
+			if (prefixMatch) {
+				haveCache = true;
+				emitLog("Session: loaded " + std::to_string(n_loaded) + " cached tokens", errorOut, onLog);
+			}
+			else {
+				emitLog("Session: cache mismatch, rebuilding...", errorOut, onLog);
+			}
+		}
+	}
+	if (haveCache) {
+		const int missing = (int)tokStatic.size() - (int)n_loaded;
+		if (missing > 0) {
+			std::vector<llama_token> tail(tokStatic.begin() + n_loaded, tokStatic.end());
+			if (!feed_prompt(impl->ctx, tail, (int32_t)n_loaded, "Building cache ", errorOut, onLog, &impl->cancelRequested))
+				return {};
+		}
+		else {
+			emitProgress(std::string("Prompt ") + makeBar((int)tokStatic.size(), (int)tokStatic.size()), onLog);
+		}
+	}
+	else {
+		if (!feed_prompt(impl->ctx, tokStatic, /*startPos*/ 0, "Building cache ", errorOut, onLog, &impl->cancelRequested))
+			return {};
+	}
+
+	if (!sessionFilePath.empty()) {
+		bool saved = llama_state_save_file(
+			impl->ctx,
+			sessionFilePath.c_str(),
+			tokStatic.data(),
+			tokStatic.size());
+		if (!saved)
+			emitLog("Session: save failed (non-fatal)", errorOut, onLog);
+		else
+			emitLog("Session: saved " + std::to_string(tokStatic.size()) + " tokens", errorOut, onLog);
+	}
+
+	if (!tokDyn.empty()) {
+		const int32_t dynStart = (int32_t)tokStatic.size();
+		if (!feed_prompt(impl->ctx, tokDyn, dynStart, "Prompt ", errorOut, onLog, &impl->cancelRequested))
+			return {};
+	}
+
 	const auto tAfterPrompt = clock::now();
-	emitLog("Prompt ingested OK. Starting sampling...", errorOut, onLog);
+	emitLog("Prompt ingested OK (static cached=" + std::string(haveCache ? "yes" : "no") + "). Starting sampling...", errorOut, onLog);
 
 	LlamaInferParams ip = inParams;
-
 	const uint32_t seedUse = ip.seed >= 0 ? (uint32_t)ip.seed : (uint32_t)impl->seed;
-	llama_sampler* chain =
-		build_sampler_chain(ip, seedUse, errorOut, onLog);
+	llama_sampler* chain = build_sampler_chain(ip, seedUse, errorOut, onLog);
 
-	// seed sampler with prompt
-	for (auto t : prompt_tokens)
-		llama_sampler_accept(chain, t);
+	for (auto t : tokStatic)  llama_sampler_accept(chain, t);
+	for (auto t : tokDyn)     llama_sampler_accept(chain, t);
 
-	// generation
 	const auto tGenStart = clock::now();
 
 	std::vector<llama_token> out_tokens;
@@ -286,14 +340,13 @@ std::string LlamaRunner::generate(const std::string& prompt,
 
 	std::string stopReason = "max_tokens";
 	const int budget = std::max(1, ip.max_tokens);
-	const int every = std::max(1, budget / 20);
+	const int every = std::max(1, budget / 100);
 
-	// incremental buffer + depth tracking (thread-local)
 	static thread_local std::string text_so_far;
-	static thread_local int  braceDepth = 0;    // { }
-	static thread_local int  bracketDepth = 0;  // [ ]
+	static thread_local int  braceDepth = 0;
+	static thread_local int  bracketDepth = 0;
 	static thread_local bool seenOpeningBrace = false;
-
+	const size_t prompt_len = tokStatic.size() + tokDyn.size();
 	for (int32_t i = 0; i < ip.max_tokens; ++i) {
 		if (impl->cancelRequested.load(std::memory_order_relaxed)) {
 			stopReason = "canceled";
@@ -308,11 +361,8 @@ std::string LlamaRunner::generate(const std::string& prompt,
 
 		// advance KV
 		llama_batch b{};
-		llama_token tok = next;
-		b.n_tokens = 1;
-		b.token = &tok;
-		llama_pos pos = (llama_pos)(prompt_tokens.size() + out_tokens.size() - 1);
-		b.pos = &pos;
+		llama_token tok = next; b.n_tokens = 1; b.token = &tok;
+		llama_pos pos = (llama_pos)(prompt_len + out_tokens.size() - 1); b.pos = &pos;
 		int32_t nseq = 1; b.n_seq_id = &nseq;
 		llama_seq_id sid = 0; llama_seq_id* sidp = &sid; b.seq_id = &sidp;
 		int8_t logits = 1; b.logits = &logits;
@@ -355,7 +405,6 @@ std::string LlamaRunner::generate(const std::string& prompt,
 			}
 		}
 
-		// 1) user-provided stop strings (wrappers only; we removed raw "}")
 		if (!ip.stop.empty() && !piece.empty()) {
 			bool hitStop = false;
 			for (const auto& stopper : ip.stop) {
@@ -365,20 +414,17 @@ std::string LlamaRunner::generate(const std::string& prompt,
 			}
 			if (hitStop) {
 				stopReason = "stop_str";
-				// small debug preview
 				std::string tail = text_so_far.size() > 120 ? text_so_far.substr(text_so_far.size() - 120) : text_so_far;
 				emitLog(std::string("Stop(str) tail: \"") + tail + "\"", errorOut, onLog);
 				goto gen_loop_done;
 			}
 		}
 
-		// 2) balanced JSON object/array: stop once both depths return to zero
 		if (seenOpeningBrace && braceDepth == 0 && bracketDepth == 0) {
 			stopReason = "balanced_json";
 			goto gen_loop_done;
 		}
 
-		// progress
 		if (((i + 1) % every) == 0 || (i + 1) == budget)
 			emitProgress(std::string("Gen ") + makeBar((i + 1), budget), onLog);
 	}
