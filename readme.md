@@ -19,8 +19,9 @@ It can operate in two modes:
    - [Cache & Uninstall Notes](#cache--uninstall-notes)
 3. [Developer Guide](#developer-guide)
    - [Project Structure](#project-structure)
-   - [Building from Source](#building-from-source)
-   - [Tweaking Behavior](#tweaking-behavior)
+   - [Building from Source](#building-from-source-windows-only)
+   - [Tweaking Behavior](#tweaking-behavior)  
+4. [Ethical concerns](#ethical-concerns)
 4. [License & Credits](#license--credits)
 
 ---
@@ -85,7 +86,7 @@ Offline mode runs a local **LLM** via the embedded `llama.cpp` backend.
 5. Wait for the status dot to turn green (model loaded).
 6. Type your musical prompt and click **Generate Pattern**.
 
-You’ll see a progress bar and log output while the model generates the pattern.
+You’ll see a progress bar while the model generates the pattern.
 
 _(image: [placeholder_offline_tab.png])_
 
@@ -286,10 +287,24 @@ For developers customizing the plugin:
 
 ---
 
+## Ethical Concerns
+
+The integration of AI into music creation raises legitimate ethical questions.  
+It’s important to acknowledge that this technology is already here and its potential use in creative work is inevitable.
+
+The philosophy behind **LLMidi** is to **empower musicians**, not replace them.  
+This plugin is designed as a **creative assistant**, not a fully autonomous composer.  
+It helps you experiment, discover new rhythmic or harmonic ideas, or overcome creative blocks while leaving artistic direction, taste, and emotion firmly in human hands.
+
+LLMidi does **not** attempt to produce finished songs or copyrighted imitations, and it encourages users to remain intentional and expressive in their craft.  
+The goal is to keep the **artist at the center of creation**, using AI as a flexible, transparent tool for inspiration , not as a substitute for creativity itself.
+
+---
+
 ## License & Credits
 
 LLMidi is **open-source**.  
-You are free to modify or integrate it in your own projects, but please **credit the original author**.
+You are free to modify or integrate it in your own projects, but please **credit the original author** if you do so.
 
 This project includes:
 
