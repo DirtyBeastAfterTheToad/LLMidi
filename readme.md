@@ -20,9 +20,9 @@ It can operate in two modes:
 3. [Developer Guide](#developer-guide)
    - [Project Structure](#project-structure)
    - [Building from Source](#building-from-source-windows-only)
-   - [Tweaking Behavior](#tweaking-behavior)  
+   - [Tweaking Behavior](#tweaking-behavior)
 4. [Ethical concerns](#ethical-concerns)
-4. [License & Credits](#license--credits)
+5. [License & Credits](#license--credits)
 
 ---
 
@@ -72,6 +72,10 @@ Then rescan your plugins in your DAW.
 
 Offline mode runs a local **LLM** via the embedded `llama.cpp` backend.
 
+<p align="center">
+  <img src="assets/offline_tab.png" alt="Offline Tab" width="400">
+</p>
+
 1. Download a compatible `.gguf` model from [Hugging Face](https://huggingface.co).  
    Recommended example:
    ```
@@ -88,7 +92,9 @@ Offline mode runs a local **LLM** via the embedded `llama.cpp` backend.
 
 You’ll see a progress bar while the model generates the pattern.
 
-_(image: [placeholder_offline_tab.png])_
+<p align="center">
+  <img src="assets/progress.png" alt="Progression bar" width="400">
+</p>
 
 When done, the plugin outputs a live MIDI pattern inside your DAW.
 
@@ -105,13 +111,19 @@ When done, the plugin outputs a live MIDI pattern inside your DAW.
   The next generation will again take longer while the cache is created.
 - Once cached, later generations will be much faster.
 
-_(image: [placeholder_cacheinfo.png])_
+<p align="center">
+  <img src="assets/cache_info.png" alt="Settings tab" width="400">
+</p>
 
 ---
 
 ### Online Mode (Windows & macOS)
 
 The online mode uses your favorite chatbot instead of a local model.
+
+<p align="center">
+  <img src="assets/online_tab.png" alt="Online Tab" width="400">
+</p>
 
 1. Open the **Online** tab.
 2. Type your description, e.g. “Fast jazz drum groove in 7/8”.
@@ -120,8 +132,6 @@ The online mode uses your favorite chatbot instead of a local model.
 5. Copy the chatbot’s pure JSON output (no code blocks or markdown).
 6. Paste it into the **Response** box in LLMidi.
 7. Click **To MIDI** to import the pattern into your DAW.
-
-_(image: [placeholder_online_tab.png])_
 
 #### Why use online mode
 
@@ -144,9 +154,10 @@ LLMidi is a **MIDI-generating plugin**. After a sequence is ready, you can recor
    ```
    Burn MIDI to new pattern
    ```
+   <p align="center">
+     <img src="assets/burn_to_midi_fl_studio.png" alt="Burn to midi process in FL Studio" width="400">
+   </p>
 5. The generated notes will appear as editable MIDI in a new pattern.
-
-_(image: [placeholder_burntomidi.png])_
 
 ##### Preview Option
 
@@ -156,7 +167,9 @@ You can also preview the generated notes before burning them:
 - Set its MIDI **Input Port** to the same value as LLMidi’s **Output Port**.
 - Press play — the synth will perform the generated pattern in real time.
 
-_(image: [placeholder_midiports.png])_
+<p align="center">
+  <img src="assets/midi_ports_fl_studio.png" alt="Midi port process in FL Studio" width="400">
+</p>
 
 #### In Other DAWs
 
@@ -312,8 +325,6 @@ This project includes:
 - [`JUCE`](https://juce.com) — audio plugin framework and UI engine
 
 ---
-
-_(image: [placeholder_banner.png])_
 
 > © 2025 — LLMidi Project  
 > Author: DirtyBeastAfterTheToad  
