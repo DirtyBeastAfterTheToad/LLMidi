@@ -535,7 +535,7 @@ std::string BackgroundGenerator::buildPrompt(bool isPhi,
 	}
 	else
 	{
-		prompt << "<s>[INST]\n" << rules.str() << "\n [/INST]";
+		prompt << "<s>[INST] \n" << rules.str() << "\n [/INST]";
 	}
 	return prompt.str();
 }

@@ -100,7 +100,7 @@ When done, the plugin outputs a live MIDI pattern inside your DAW.
 
 #### Performance & Cache Notes
 
-- The **first generation** using a new model will take significantly longer — this is normal.  
+- The **first generation** using a new model will take significantly longer , this is normal.  
   LLMidi builds a persistent **cache** for that specific model to speed up future generations.
 - Each model has its own cache file stored in:
   ```
@@ -165,7 +165,7 @@ You can also preview the generated notes before burning them:
 
 - Load any synth plugin.
 - Set its MIDI **Input Port** to the same value as LLMidi’s **Output Port**.
-- Press play — the synth will perform the generated pattern in real time.
+- Press play , the synth will perform the generated pattern in real time.
 
 <p align="center">
   <img src="assets/midi_ports_fl_studio.png" alt="Midi port process in FL Studio" width="400">
@@ -173,9 +173,9 @@ You can also preview the generated notes before burning them:
 
 #### In Other DAWs
 
-- **Ableton Live (Windows/macOS)** — Create a MIDI track using LLMidi as the source. Arm and record to capture the generated notes.
-- **Reaper / Cubase / Bitwig / Studio One** — Route the MIDI output from LLMidi to another track and record or freeze it.
-- **Logic Pro (macOS)** — Not supported, since Logic uses AU format only (VST3 not supported).
+- **Ableton Live (Windows/macOS)** , Create a MIDI track using LLMidi as the source. Arm and record to capture the generated notes.
+- **Reaper / Cubase / Bitwig / Studio One** , Route the MIDI output from LLMidi to another track and record or freeze it.
+- **Logic Pro (macOS)** , Not supported, since Logic uses AU format only (VST3 not supported).
 
 ---
 
@@ -321,11 +321,11 @@ You are free to modify or integrate it in your own projects, but please **credit
 
 This project includes:
 
-- [`llama.cpp`](https://github.com/ggerganov/llama.cpp) — local inference backend
-- [`JUCE`](https://juce.com) — audio plugin framework and UI engine
+- [`llama.cpp`](https://github.com/ggerganov/llama.cpp) , local inference backend
+- [`JUCE`](https://juce.com) , audio plugin framework and UI engine
 
 ---
 
-> © 2025 — LLMidi Project  
+> © 2025 , LLMidi Project  
 > Author: DirtyBeastAfterTheToad  
 > Free to use and modify with attribution.
