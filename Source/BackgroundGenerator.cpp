@@ -365,7 +365,7 @@ void BackgroundGenerator::runPatternGeneration(const GenRequest& req)
 	ip.seed = req.seed;
 	ip.grammar.clear();
 	ip.stop.clear();
-	ip.stop.push_back("```");
+	//ip.stop.push_back("```");
 	ip.stop.push_back("<|end|>");
 	ip.stop.push_back("<|endoftext|>");
 	ip.stop.push_back("<|im_end|>");
@@ -535,7 +535,7 @@ std::string BackgroundGenerator::buildPrompt(bool isPhi,
 	}
 	else
 	{
-		prompt << "<s>[INST] <<SYS>>\n" << rules.str() << "\n<</SYS>> [/INST]";
+		prompt << "<s>[INST]\n" << rules.str() << "\n [/INST]";
 	}
 	return prompt.str();
 }

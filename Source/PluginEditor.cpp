@@ -374,10 +374,11 @@ void LLMidiAudioProcessorEditor::updateGenProgress()
 		return;
 	}
 
+	const int  lastCache = bgLog.lastIndexOf("Building cache [");
 	const int  lastPrompt = bgLog.lastIndexOf("Prompt [");
 	const int  lastGen = bgLog.lastIndexOf("Gen [");
-	const int  useIdx = juce::jmax(lastPrompt, lastGen);
 	const bool done = bgLog.containsIgnoreCase("sequence ready");
+	const int  useIdx = juce::jmax(lastCache, juce::jmax(lastPrompt, lastGen));
 
 	if (done)
 	{
@@ -420,10 +421,18 @@ void LLMidiAudioProcessorEditor::updateGenProgress()
 			bar.setProgress(juce::jlimit(0, 100, pct) / 100.0);
 		}
 
-		offlinePage->setStageText(
-			(useIdx == lastPrompt) ? "Ingesting prompt..." : "Generating the pattern...",
-			juce::Colours::white
-		);
+		if (useIdx == lastCache)
+		{
+			offlinePage->setStageText("Building cache...", juce::Colours::orange);
+		}
+		else if (useIdx == lastPrompt)
+		{
+			offlinePage->setStageText("Ingesting prompt...", juce::Colours::white);
+		}
+		else
+		{
+			offlinePage->setStageText("Generating the pattern...", juce::Colours::limegreen);
+		}
 		bar.setActive(true);
 	}
 }

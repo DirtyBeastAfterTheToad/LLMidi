@@ -184,7 +184,7 @@ bool LlamaRunner::loadModel(const std::string& path,
 	llama_backend_init();
 
 	llama_model_params mparams = llama_model_default_params();
-
+	mparams.use_mmap = false;
 	llama_context_params cparams = llama_context_default_params();
 	cparams.n_ctx = (uint32_t)p.n_ctx;
 	cparams.n_batch = (uint32_t)p.n_batch;
